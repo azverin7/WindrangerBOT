@@ -1,0 +1,32 @@
+services:
+  bot:
+    build: .
+    container_name: windranger_bot
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - mongo
+    volumes:
+      - ./bot.log:/app/bot.log
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mongo:
+    image: mongo:7.0
+    container_name: windranger_db
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mongo_data:

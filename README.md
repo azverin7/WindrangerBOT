@@ -57,10 +57,11 @@ The bot uses prefix commands (default: `!`) and interactive Discord UI component
 ###  Administration
 * `!setup` — Initializes the database structure, creates required categories, and sets up matchmaking channels for the current guild.
 * `!reset_season` — Archives all current player statistics and starts a new competitive season (Admin only).
-* `!cancel_match [match_id]` — Forcefully cancels an ongoing match and reverts player statistics.
+* `!cancel [match_id]` — Forcefully cancels an ongoing match and reverts player statistics.
+* `!viewmode 1-5` — 
 
 ###  Matchmaking & Lobbies
-* `!c` (or `!close`) — Creates a new active lobby in the matchmaking channel.
+* `!c` (or `!create`) — Creates a new active lobby in the matchmaking channel.
 * *Note: Joining, leaving, and team drafting are handled entirely via interactive Discord Buttons attached to the lobby embed.*
 
 ###  Player Statistics & History

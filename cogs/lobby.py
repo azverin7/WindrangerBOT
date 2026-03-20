@@ -90,24 +90,27 @@ class LobbyCog(commands.Cog):
             return "IGNORE"
 
         is_busy = await db.lobbies.find_one({"all_players": user.id, "active": False, "guild_id": guild_id})
-        if is_busy:
-            if is_busy["lobby_id"] != l_id:
-                return f"Ты уже в лобби #{is_busy['lobby_id']}."
-            if user.id in is_busy["roles"].get(role_key, []):
-                return "IGNORE"
+        if is_busy and is_busy["lobby_id"] != l_id:
+            return f"Ты уже в лобби #{is_busy['lobby_id']}."
 
-            pull_dict = {f"roles.{k}": user.id for k, v in is_busy["roles"].items() if user.id in v}
-            if pull_dict:
-                res = await db.lobbies.update_one(
-                    {"lobby_id": l_id, "active": False, "guild_id": guild_id, f"roles.{role_key}.1": {"$exists": False}},
-                    {"$pull": pull_dict, "$addToSet": {f"roles.{role_key}": user.id}}
-                )
-                return True if res.modified_count > 0 else "IGNORE"
-
+        pull_roles = {f"roles.{i}": user.id for i in range(1, 6) if str(i) != role_key}
+        
         res = await db.lobbies.update_one(
-            {"lobby_id": l_id, "active": False, "guild_id": guild_id, f"roles.{role_key}.1": {"$exists": False}},
-            {"$addToSet": {f"roles.{role_key}": user.id, "all_players": user.id}}
+            {
+                "lobby_id": l_id, 
+                "active": False, 
+                "guild_id": guild_id, 
+                f"roles.{role_key}.1": {"$exists": False} 
+            },
+            {
+                "$pull": pull_roles,
+                "$addToSet": {
+                    f"roles.{role_key}": user.id, 
+                    "all_players": user.id
+                }
+            }
         )
+        
         return True if res.modified_count > 0 else "IGNORE"
 
     async def perform_leave(self, user: Union[discord.Member, discord.User], l_id: int, guild_id: int) -> bool:
@@ -285,8 +288,32 @@ class LobbyCog(commands.Cog):
                 lobby["roles"][pos_str].append(fake_id)
                 lobby["all_players"].append(fake_id)
 
-        await db.lobbies.replace_one({"_id": lobby["_id"]}, lobby)
+        await db.lobbies.update_one(
+            {"_id": lobby["_id"]},
+            {"$set": {"roles": lobby["roles"], "all_players": lobby["all_players"]}}
+        )
         await self.update_lobby_message(lobby["lobby_id"], ctx.guild)
+
+    async def _distribute_players(self, guild, l_id, lobby_pass, started_time, radiant, dire, rad_vc, dire_vc, host_id):
+        for team_dict, vc, team_name in [(radiant, rad_vc, "Radiant"), (dire, dire_vc, "Dire")]:
+            for p_id in team_dict.values():
+                member = guild.get_member(p_id)
+                if member:
+                    try:
+                        await member.move_to(vc)
+                    except discord.HTTPException:
+                        pass
+                    
+                    try:
+                        dm_embed = UIHandler.create_dm_embed(
+                            l_id=l_id, pw=lobby_pass, side=team_name, guild=guild, 
+                            radiant=radiant, dire=dire, host_id=host_id, started_at=started_time
+                        )
+                        await member.send(embed=dm_embed)
+                    except discord.HTTPException:
+                        pass
+                    
+                    await asyncio.sleep(0.3)
 
     @commands.command(name="start", aliases=["s"])
     async def start_match(self, ctx: commands.Context, l_id: Optional[int] = None):
@@ -311,12 +338,8 @@ class LobbyCog(commands.Cog):
             if len(lobby.get("all_players", [])) != 10: return await ctx.send(f"Лобби #{l_id} еще не заполнено.", delete_after=5)
 
         radiant, dire = UIHandler.balance_teams_random(lobby["roles"])
-        lobby.update({"radiant": radiant, "dire": dire, "active": True})
-
         started_time = discord.utils.utcnow()
-        lobby["started_at"] = started_time
         lobby_pass = str(random.randint(1000, 9999))
-        lobby["password"] = lobby_pass
 
         cat_id = ctx.channel.category_id
         category = ctx.guild.get_channel(cat_id) if cat_id else None
@@ -325,7 +348,6 @@ class LobbyCog(commands.Cog):
         try:
             rad_vc = await ctx.guild.create_voice_channel(f"Radiant #{l_id}", category=category)
             dire_vc = await ctx.guild.create_voice_channel(f"Dire #{l_id}", category=category)
-            lobby["voice_channels"] = [rad_vc.id, dire_vc.id]
         except discord.HTTPException as e:
             if rad_vc:
                 try: await rad_vc.delete()
@@ -336,7 +358,26 @@ class LobbyCog(commands.Cog):
             logger.error(f"Failed to create VCs for lobby {l_id}: {e}")
             return await ctx.send("Ошибка создания голосовых каналов. Проверьте права бота.", delete_after=5)
 
-        await db.lobbies.replace_one({"_id": lobby["_id"]}, lobby)
+        await db.lobbies.update_one(
+            {"_id": lobby["_id"]},
+            {"$set": {
+                "radiant": radiant,
+                "dire": dire,
+                "active": True,
+                "started_at": started_time,
+                "password": lobby_pass,
+                "voice_channels": [rad_vc.id, dire_vc.id]
+            }}
+        )
+
+        lobby.update({
+            "radiant": radiant, 
+            "dire": dire, 
+            "active": True, 
+            "started_at": started_time, 
+            "password": lobby_pass, 
+            "voice_channels": [rad_vc.id, dire_vc.id]
+        })
 
         try:
             msg = await ctx.channel.fetch_message(lobby["status_msg_id"])
@@ -350,17 +391,12 @@ class LobbyCog(commands.Cog):
         except discord.HTTPException as e: 
             logger.error(f"Failed updating lobby message: {e}")
 
-        for team_dict, vc, team_name in [(radiant, rad_vc, "Radiant"), (dire, dire_vc, "Dire")]:
-            for p_id in team_dict.values():
-                member = ctx.guild.get_member(p_id)
-                if member:
-                    try: await member.move_to(vc)
-                    except discord.HTTPException: pass
-                    
-                    try:
-                        dm_embed = UIHandler.create_dm_embed(l_id=l_id, pw=lobby_pass, side=team_name, guild=ctx.guild, radiant=radiant, dire=dire, host_id=lobby["host_id"], started_at=started_time)
-                        await member.send(embed=dm_embed)
-                    except discord.Forbidden: pass
+        self.bot.loop.create_task(self._distribute_players(
+            ctx.guild, l_id, lobby_pass, started_time, 
+            radiant, dire, rad_vc, dire_vc, lobby["host_id"]
+        ))
+        
+        await ctx.send(f"Матч #{l_id} запускается. Созданы каналы, рассылаю пароли...", delete_after=5)
 
     @commands.command(name="cancel")
     @is_privileged()
@@ -372,9 +408,16 @@ class LobbyCog(commands.Cog):
         lobby = await db.lobbies.find_one_and_delete({"lobby_id": l_id, "guild_id": ctx.guild.id})
         if not lobby: return await ctx.send(f"Лобби #{l_id} не найдено.", delete_after=5)
 
+        config = await db.get_guild_config(ctx.guild.id)
+        waiting_vc = ctx.guild.get_channel(config.get("waiting_vc_id"))
+
         for vc_id in lobby.get("voice_channels", []):
             vc = self.bot.get_channel(vc_id)
             if vc:
+                if waiting_vc:
+                    for m in vc.members:
+                        try: await m.move_to(waiting_vc)
+                        except discord.HTTPException: pass
                 try: await vc.delete()
                 except discord.HTTPException: pass
 
@@ -382,6 +425,7 @@ class LobbyCog(commands.Cog):
             msg = await ctx.channel.fetch_message(lobby["status_msg_id"])
             await msg.delete()
         except discord.HTTPException: pass
+        
         await ctx.send(f"Лобби #{l_id} отменено.", delete_after=5)
 
     @commands.command(name="win", aliases=["end"])

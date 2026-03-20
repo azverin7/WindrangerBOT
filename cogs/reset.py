@@ -1,10 +1,13 @@
 from typing import Optional
 
 import discord
+import logging
+
+
 from discord.ext import commands
 
 from database.mongo import db
-
+logger = logging.getLogger('windranger.reset')
 class ResetCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -31,9 +34,9 @@ class ResetCog(commands.Cog):
         )
 
         try:
-            await db.counters.delete_many({"guild_id": ctx.guild.id})
-        except:
-            pass
+            await db.settings.delete_one({"_id": f"counters_{ctx.guild.id}"})
+        except Exception as e:
+            logger.error(f"Failed to reset counters during hard reset: {e}")
 
         stats_cog = self.bot.get_cog("StatsCog")
         if stats_cog:

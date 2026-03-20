@@ -69,7 +69,7 @@ class AdminCog(commands.Cog):
             name="ИГРОКАМ: Как участвовать",
             value=(
                 "В зависимости от настроек сервера, регистрация происходит через реакции, кнопки или команды в чат.\n"
-                "• **1️⃣-5️⃣** или команды **!1-!5** — Занять позицию (Carry, Mid, Offlane, Soft Supp, Hard Supp).\n"
+                "• **1️⃣-5️⃣** или команды **!1-!5 <ID>** — Занять позицию (Carry, Mid, Offlane, Soft Supp, Hard Supp).\n"
                 "• **❌** или команда **!out** — Покинуть лобби.\n"
                 "> *Перед регистрацией необходимо находиться в голосовом канале 'Ожидание клоза'.*"
             ),
@@ -81,11 +81,11 @@ class AdminCog(commands.Cog):
                 "• `!create` (или `!c`) — Создать лобби.\n"
                 "• `!start <ID>` (или `!s`) — Запустить матч (авто-баланс, войсы, рассылка паролей).\n"
                 "• `!cancel <ID>` — Отменить сбор.\n"
-                "• `!win radiant <ID>` (или `!win dire`) — Завершить матч и начислить PTS."
+                "• `!win <ID> radiant ` (или `!win <ID> dire`) — Завершить матч и начислить PTS."
             ),
             inline=False
         )
-        guide_embed.set_footer(text="Админ-команды: !viewmode [1-5], !clear")
+        guide_embed.set_footer(text="Админ-команды: !viewmode [1-5] - изменить режим отображения, !clear - очистить чат. (по стандарту 10 сообщений)")
         
         await reg_ch.send(embed=guide_embed)
         

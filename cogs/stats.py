@@ -2,10 +2,13 @@ from typing import Optional
 
 import discord
 from discord.ext import commands
+import logging
 
 from core.config import ROLE_MAP, E_MEDALS, E_TROPHY
 from database.mongo import db
 from utils.factory import UIHandler
+
+logger = logging.getLogger('windranger.stats')
 
 class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -16,27 +19,25 @@ class StatsCog(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
-        config = await db.settings.find_one({"_id": str(message.guild.id)})
-        if not config:
+        config = await db.get_guild_config(message.guild.id)
+        if not config or message.channel.id != config.get("stats_channel_id"):
             return
 
-        stats_channel_id = config.get("stats_channel_id")
-        if message.channel.id == stats_channel_id:
-            if not message.content.lower().startswith(("!stats", "!rank")):
-                try:
-                    await message.delete()
-                except:
-                    pass
+        if not message.content.lower().startswith(("!stats", "!rank")):
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
 
     async def _check_channel(self, ctx: commands.Context, channel_type: str) -> bool:
-        config = await db.settings.find_one({"_id": str(ctx.guild.id)})
+        config = await db.get_guild_config(ctx.guild.id)
         if not config: return False
         
         target_id = config.get(f"{channel_type}_channel_id")
         return ctx.channel.id == target_id
 
     async def update_leaderboard(self, guild: discord.Guild) -> None:
-        config = await db.settings.find_one({"_id": str(guild.id)})
+        config = await db.get_guild_config(guild.id)
         if not config: return
         
         lb_channel_id = config.get("leaderboard_channel_id")
@@ -80,6 +81,7 @@ class StatsCog(commands.Cog):
 
         new_msg = await channel.send(embed=embed)
         await db.settings.update_one({"_id": str(guild.id)}, {"$set": {"leaderboard_msg_id": new_msg.id}})
+        db.clear_cache(guild.id)
 
     @commands.command(name="stats", aliases=["rank"])
     async def show_stats(self, ctx: commands.Context, member: Optional[discord.Member] = None):
@@ -87,7 +89,7 @@ class StatsCog(commands.Cog):
         
         try:
             await ctx.message.delete()
-        except:
+        except discord.HTTPException:
             pass
             
         target = member or ctx.author
@@ -168,7 +170,7 @@ class StatsCog(commands.Cog):
     async def force_top(self, ctx: commands.Context):
         if not await self._check_channel(ctx, "leaderboard"): return
         try: await ctx.message.delete()
-        except: pass
+        except discord.HTTPException: pass
         await self.update_leaderboard(ctx.guild)
         
 async def setup(bot: commands.Bot) -> None:

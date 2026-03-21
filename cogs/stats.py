@@ -12,14 +12,6 @@ class StatsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    async def _get_current_season(self, guild_id: str) -> int:
-        settings = await self.bot.db.settings.find_one({"_id": guild_id})
-        return settings.get("current_season", 1) if settings else 1
-
-    async def _get_emojis(self, guild: discord.Guild) -> dict:
-        settings = await self.bot.db.settings.find_one({"_id": str(guild.id)})
-        return settings.get("emojis", {}) if settings else {}
-
     async def _get_top_players(self, guild_id: str, season: int, limit: int = 10) -> list:
         cursor = self.bot.db.users.find(
             {"guild_id": guild_id, "season": season, "matches": {"$gt": 0}}
@@ -27,22 +19,24 @@ class StatsCog(commands.Cog):
         return await cursor.to_list(length=limit)
 
     async def update_leaderboard(self, guild: discord.Guild):
-        settings = await self.bot.db.settings.find_one({"_id": str(guild.id)})
-        if not settings or not (lb_channel_id := settings.get("leaderboard_channel_id")):
+        config = await self.bot.db.get_guild_config(guild.id)
+        lb_channel_id = config.get("leaderboard_channel_id")
+        if not lb_channel_id:
             return
             
         channel = guild.get_channel(int(lb_channel_id))
         if not channel:
             return
 
-        current_season = settings.get("current_season", 1)
+        current_season = config.get("current_season", 1)
         tops = await self._get_top_players(str(guild.id), current_season)
         
         embed = WindrangerEmbed.leaderboard(guild, tops, current_season)
-        embed.set_footer(text=f"Обновлено: {discord.utils.utcnow().strftime('%H:%M:%S')}")
-
+        
+        msg_id = config.get("leaderboard_msg_id")
         msg = None
-        if msg_id := settings.get("leaderboard_msg_id"):
+        
+        if msg_id:
             try:
                 msg = await channel.fetch_message(int(msg_id))
             except discord.NotFound:
@@ -60,6 +54,7 @@ class StatsCog(commands.Cog):
                     {"_id": str(guild.id)}, 
                     {"$set": {"leaderboard_msg_id": str(new_msg.id)}}
                 )
+                self.bot.db.clear_cache(guild.id)
             except discord.HTTPException as e:
                 logger.error(f"Failed to send new leaderboard message in {guild.id}: {e}")
 
@@ -69,7 +64,8 @@ class StatsCog(commands.Cog):
         target = member or interaction.user
         guild_id = str(interaction.guild.id)
         
-        current_season = await self._get_current_season(guild_id)
+        config = await self.bot.db.get_guild_config(guild_id)
+        current_season = config.get("current_season", 1)
         
         p_data = await self.bot.db.users.find_one({
             "_id": str(target.id), 
@@ -90,7 +86,7 @@ class StatsCog(commands.Cog):
         })
         rank_int = players_above + 1
 
-        emojis = await self._get_emojis(interaction.guild)
+        emojis = config.get("emojis", {})
         embed = WindrangerEmbed.player_stats(target, p_data, rank_int, emojis)
         embed.title = f"📊 Сезон {current_season} | Статистика: {target.display_name}"
         embed.set_footer(text=f"Запросил: {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
@@ -102,7 +98,9 @@ class StatsCog(commands.Cog):
         await interaction.response.defer()
         guild_id = str(interaction.guild.id)
         
-        current_season = await self._get_current_season(guild_id)
+        config = await self.bot.db.get_guild_config(guild_id)
+        current_season = config.get("current_season", 1)
+        
         tops = await self._get_top_players(guild_id, current_season)
         
         if not tops:
@@ -118,7 +116,9 @@ class StatsCog(commands.Cog):
     async def set_mmr(self, interaction: discord.Interaction, member: discord.Member, mmr: int):
         await interaction.response.defer(ephemeral=True)
         guild_id = str(interaction.guild.id)
-        current_season = await self._get_current_season(guild_id)
+        
+        config = await self.bot.db.get_guild_config(guild_id)
+        current_season = config.get("current_season", 1)
         
         await self.bot.db.users.update_one(
             {"_id": str(member.id), "guild_id": guild_id},

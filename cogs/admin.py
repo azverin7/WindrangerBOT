@@ -23,9 +23,9 @@ def is_admin_or_dev():
         if isinstance(user, discord.Member) and user.guild_permissions.administrator:
             return True
             
-        settings = await interaction.client.db.settings.find_one({"_id": str(guild.id)})
+        settings = await interaction.client.db.get_guild_config(guild.id)
         if settings and (host_role_id := settings.get("host_role_id")):
-            role = guild.get_role(host_role_id)
+            role = guild.get_role(int(host_role_id))
             if role and role in user.roles:
                 return True
                 
@@ -47,7 +47,7 @@ class AdminCog(commands.Cog):
         self.bot = bot
 
     async def _cleanup_infrastructure(self, guild: discord.Guild) -> int:
-        settings = await self.bot.db.settings.find_one({"_id": str(guild.id)})
+        settings = await self.bot.db.get_guild_config(guild.id)
         target_categories = set()
 
         if settings and (reg_channel_id := settings.get("reg_channel_id")):
@@ -118,8 +118,13 @@ class AdminCog(commands.Cog):
             }},
             upsert=True
         )
+        
+        self.bot.db.clear_cache(guild.id)
 
-        await interaction.followup.send("✅ Старая инфраструктура удалена, новая успешно создана и привязана к базе.")
+        try:
+            await interaction.followup.send("✅ Старая инфраструктура удалена, новая успешно создана и привязана к базе.")
+        except discord.NotFound:
+            pass
 
     @app_commands.command(name="clear", description="[HOST] Очистить сообщения в текущем канале")
     @app_commands.describe(amount="Количество сообщений для удаления (1-100)")
@@ -158,6 +163,8 @@ class AdminCog(commands.Cog):
                 "waiting_room_id": ""
             }}
         )
+        
+        self.bot.db.clear_cache(guild.id)
 
         try:
             await interaction.followup.send(f"✅ Инфраструктура удалена. Удалено объектов: **{deleted_count}**.")
@@ -204,11 +211,17 @@ class AdminCog(commands.Cog):
                 await stats_cog.update_leaderboard(interaction.guild)
 
             logger.info(f"HARD RESET executed by {interaction.user.id} on Guild: {guild_id}")
-            await interaction.followup.send("✅ База данных сервера полностью очищена. Сезоны сброшены, статистика удалена.")
+            try:
+                await interaction.followup.send("✅ База данных сервера полностью очищена. Сезоны сброшены, статистика удалена.")
+            except discord.NotFound:
+                pass
 
         except Exception as e:
             logger.error(f"Error during hard reset on guild {guild_id}: {e}", exc_info=True)
-            await interaction.followup.send("❌ Произошла критическая ошибка при очистке базы данных.")
+            try:
+                await interaction.followup.send("❌ Произошла критическая ошибка при очистке базы данных.")
+            except discord.NotFound:
+                pass
 
     @app_commands.command(name="unban", description="[HOST] Снять блокировку регистрации с игрока")
     @is_admin_or_dev()

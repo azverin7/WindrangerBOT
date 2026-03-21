@@ -1,7 +1,6 @@
 import discord
 from discord import app_commands
 from core.config import DEVELOPER_ID
-from database.mongo import db
 
 class SilentCheckFailure(app_commands.CheckFailure):
     pass
@@ -21,7 +20,7 @@ def is_privileged(grand_only: bool = False):
             return True
 
         if not grand_only:
-            config = await db.get_guild_config(guild.id)
+            config = await interaction.client.db.get_guild_config(guild.id)
             if host_role_id := config.get("host_role_id"):
                 role = guild.get_role(host_role_id)
                 if role and isinstance(user, discord.Member) and role in user.roles:

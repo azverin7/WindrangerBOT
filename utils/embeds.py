@@ -45,7 +45,7 @@ class WindrangerEmbed:
         
         embed = discord.Embed(
             title=f"{dota_emoji} Лобби #{short_id} запущено",
-            color=COLOR_ERROR,
+            color=COLOR_MAIN,
             timestamp=discord.utils.utcnow()
         )
         
@@ -87,10 +87,12 @@ class WindrangerEmbed:
             f"*Заходите в лобби!*"
         )
         
+        team_color = COLOR_SUCCESS if team_name == "Radiant" else COLOR_ERROR
+
         embed = discord.Embed(
             title=f"{dota_emoji} Клоз #{short_id} стартовал!",
             description=desc,
-            color=COLOR_MAIN,
+            color=team_color,
             timestamp=discord.utils.utcnow()
         )
         
@@ -159,7 +161,7 @@ class WindrangerEmbed:
 
     @staticmethod
     def player_stats(member: discord.Member | discord.User, data: dict, rank: int, emojis: dict) -> discord.Embed:
-        mmr = data["mmr"]
+        mmr = data.get("mmr", 1000)
         matches = data.get("matches", 0)
         wins = data.get("wins", 0)
         losses = data.get("losses", 0)
@@ -214,7 +216,7 @@ class WindrangerEmbed:
 
         desc_lines = []
         for i, p in enumerate(tops):
-            mmr = p["mmr"]
+            mmr = p.get("mmr", 1000)
             wins = p.get("wins", 0)
             matches = p.get("matches", 0)
             losses = matches - wins

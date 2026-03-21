@@ -2,6 +2,7 @@ import asyncio
 import logging
 import discord
 from discord.ext import commands
+import uvloop
 
 from core.bot import WindrangerBot
 from core.logger import setup_logging
@@ -32,6 +33,7 @@ async def main():
         await bot.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
+    uvloop.install()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

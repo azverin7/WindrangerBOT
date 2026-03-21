@@ -7,7 +7,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-from database.mongo import db
+from database.mongo import Database
 
 logger = logging.getLogger('windranger.bot')
 
@@ -21,7 +21,7 @@ class WindrangerBot(commands.Bot):
         intents.members = True
         intents.voice_states = True
         super().__init__(command_prefix="!", intents=intents, help_command=None)
-        self.db = db
+        self.db = Database()
         self.disabled_cogs: List[str] = []
 
     async def setup_hook(self) -> None:
@@ -44,27 +44,6 @@ class WindrangerBot(commands.Bot):
                     logger.info(f"LOADED: {cog_name}")
                 except Exception as e:
                     logger.error(f"FAILED TO LOAD {cog_name}: {e}", exc_info=True)
-
-        try:
-            lobby_cog = self.get_cog("LobbyCog")
-            if lobby_cog:
-                from cogs.lobby import LobbyView
-                
-                cursor = self.db.active_lobbies.find({
-                    "shuffled": False, 
-                    "message_id": {"$ne": None}
-                })
-                
-                async for lobby in cursor:
-                    guild = self.get_guild(int(lobby["guild_id"]))
-                    if guild:
-                        emojis = await lobby_cog._update_guild_emojis(guild)
-                        self.add_view(
-                            LobbyView(self, lobby["_id"], emojis),
-                            message_id=int(lobby["message_id"])
-                        )
-        except Exception as e:
-            logger.error(f"Failed to restore persistent views: {e}", exc_info=True)
 
         self.tree.on_error = self.on_app_command_error
 

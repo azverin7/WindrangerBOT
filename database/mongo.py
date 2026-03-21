@@ -68,7 +68,7 @@ class Database:
     async def get_guild_config(self, guild_id: int | str) -> dict:
         gid = str(guild_id)
         if gid not in self._cache:
-            if not self.settings:
+            if self.settings is None:
                 return {}
             data = await self.settings.find_one({"_id": gid})
             self._cache[gid] = data or {}
@@ -79,7 +79,7 @@ class Database:
 
     async def get_next_lobby_id(self, guild_id: int | str) -> int:
         gid = str(guild_id)
-        if not self.settings:
+        if self.settings is None:
             return 1
             
         res = await self.settings.find_one_and_update(
@@ -92,7 +92,7 @@ class Database:
 
     async def get_next_match_id(self, guild_id: int | str) -> int:
         gid = str(guild_id)
-        if not self.settings:
+        if self.settings is None:
             return 1
             
         res = await self.settings.find_one_and_update(
@@ -102,5 +102,3 @@ class Database:
             return_document=ReturnDocument.AFTER
         )
         return res.get("match_sequence", 1)
-
-db = Database()

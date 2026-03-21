@@ -1,12 +1,22 @@
-import random
 import asyncio
+import logging
 import datetime
+import secrets
+from typing import Optional
+
 import discord
 from discord.ext import commands
 from discord import app_commands
 from pymongo import UpdateOne, ReturnDocument
+
 from utils.embeds import WindrangerEmbed
 from utils.matchmaking import balance_teams_by_mmr
+from utils.checks import is_privileged
+
+logger = logging.getLogger('windranger.lobby')
+
+def is_dummy_player(uid: str | int) -> bool:
+    return str(uid).startswith("1000000000000000")
 
 class AdminLobbyView(discord.ui.View):
     def __init__(self, bot, lobby: dict, message: discord.Message, emojis: dict):
@@ -26,11 +36,11 @@ class AdminLobbyView(discord.ui.View):
             btn_start.callback = self.btn_start
             self.add_item(btn_start)
         else:
-            btn_win_rad = discord.ui.Button(label="🏆 Победитель: Свет", style=discord.ButtonStyle.success, custom_id="admin_win_radiant")
+            btn_win_rad = discord.ui.Button(label="🏆 Победитель: Radiant", style=discord.ButtonStyle.success, custom_id="admin_win_radiant")
             btn_win_rad.callback = self.btn_win_radiant
             self.add_item(btn_win_rad)
 
-            btn_win_dir = discord.ui.Button(label="🏆 Победитель: Тьма", style=discord.ButtonStyle.success, custom_id="admin_win_dire")
+            btn_win_dir = discord.ui.Button(label="🏆 Победитель: Dire", style=discord.ButtonStyle.success, custom_id="admin_win_dire")
             btn_win_dir.callback = self.btn_win_dire
             self.add_item(btn_win_dir)
 
@@ -46,7 +56,10 @@ class AdminLobbyView(discord.ui.View):
         if not all(len(slots[p]) == 2 for p in ("pos1", "pos2", "pos3", "pos4", "pos5")):
             return await interaction.followup.send("❌ Нельзя запустить лобби: не все слоты заняты (нужно 10/10).", ephemeral=True)
 
-        all_uids = [uid for players in slots.values() for uid in players]
+        all_uids = lobby.get("all_players", [])
+        if not all_uids:
+            all_uids = [uid for players in slots.values() for uid in players]
+
         users_cursor = self.bot.db.users.find({"_id": {"$in": all_uids}, "guild_id": str(interaction.guild.id)})
         
         user_mmrs = {uid: 1000 for uid in all_uids}
@@ -55,57 +68,60 @@ class AdminLobbyView(discord.ui.View):
 
         radiant, dire = balance_teams_by_mmr(slots, user_mmrs)
 
-        password = str(random.randint(1000, 9999))
+        password = str(secrets.randbelow(9000) + 1000)
+        
+        guild = interaction.guild
+        category = self.message.channel.category
+        short_id = self.lobby_id.split('_')[1] if '_' in self.lobby_id else self.lobby_id
+        host = guild.get_member(int(lobby["host_id"]))
+
+        radiant_vc = None
+        dire_vc = None
+
+        try:
+            radiant_vc = await guild.create_voice_channel(name=f"🟩 Radiant #{short_id}", category=category)
+            dire_vc = await guild.create_voice_channel(name=f"🟥 Dire #{short_id}", category=category)
+        except discord.Forbidden:
+            return await interaction.followup.send("⚠️ У бота нет прав на создание голосовых каналов.", ephemeral=True)
+        except discord.HTTPException as e:
+            logger.error(f"Failed to create VCs for lobby {self.lobby_id}: {e}")
+            if radiant_vc: await radiant_vc.delete()
+            if dire_vc: await dire_vc.delete()
+            return await interaction.followup.send("❌ Ошибка API Discord при создании каналов.", ephemeral=True)
+
         lobby.update({
             "shuffled": True,
             "radiant": radiant,
             "dire": dire,
-            "password": password
+            "password": password,
+            "radiant_vc": radiant_vc.id,
+            "dire_vc": dire_vc.id
         })
 
-        guild = interaction.guild
-        category = self.message.channel.category
-        short_id = self.lobby_id.split('_')[1]
-        host = guild.get_member(int(lobby["host_id"]))
-
-        try:
-            vc_results = await asyncio.gather(
-                guild.create_voice_channel(name=f"🟩 Radiant #{short_id}", category=category),
-                guild.create_voice_channel(name=f"🟥 Dire #{short_id}", category=category),
-                return_exceptions=True
-            )
-            
-            radiant_vc, dire_vc = vc_results
-            if isinstance(radiant_vc, Exception) or isinstance(dire_vc, Exception):
-                raise discord.Forbidden("Failed to create channels")
-
-            lobby["radiant_vc"] = radiant_vc.id
-            lobby["dire_vc"] = dire_vc.id
-
-            move_tasks = []
-            dm_tasks = []
-
-            for team, vc in [(radiant, radiant_vc), (dire, dire_vc)]:
-                team_name = "Radiant" if vc == radiant_vc else "Dire"
-                for uid in team.values():
-                    m = guild.get_member(int(uid))
-                    if not m:
-                        continue
-                    if m.voice:
-                        move_tasks.append(m.move_to(vc))
-                    if not m.bot and not str(uid).startswith("1000000000000000"):
-                        embed_dm = WindrangerEmbed.dm_info(self.lobby_id, password, team_name, host, guild, radiant, dire, self.emojis)
-                        dm_tasks.append(m.send(embed=embed_dm))
-
-            if move_tasks:
-                await asyncio.gather(*move_tasks, return_exceptions=True)
-            if dm_tasks:
-                await asyncio.gather(*dm_tasks, return_exceptions=True)
-
-        except discord.Forbidden:
-            await interaction.channel.send("⚠️ У бота нет прав на создание голосовых каналов или перемещение пользователей.")
-
         await db.update_one({"_id": self.lobby_id}, {"$set": lobby})
+
+        move_tasks = []
+        for team, vc in [(radiant, radiant_vc), (dire, dire_vc)]:
+            team_name = "Radiant" if vc == radiant_vc else "Dire"
+            for uid in team.values():
+                if is_dummy_player(uid):
+                    continue
+                    
+                m = guild.get_member(int(uid))
+                if not m:
+                    continue
+                    
+                if m.voice:
+                    move_tasks.append(m.move_to(vc))
+                
+                embed_dm = WindrangerEmbed.dm_info(self.lobby_id, password, team_name, host, guild, radiant, dire, self.emojis)
+                try:
+                    await m.send(embed=embed_dm)
+                except discord.Forbidden:
+                    logger.info(f"Could not send DM to {m.display_name} (DMs disabled).")
+
+        if move_tasks:
+            await asyncio.gather(*move_tasks, return_exceptions=True)
 
         embed = WindrangerEmbed.post_shuffle(self.lobby_id, host, guild, radiant, dire, self.emojis)
         main_view = LobbyView(self.bot, self.lobby_id, self.emojis)
@@ -138,13 +154,13 @@ class AdminLobbyView(discord.ui.View):
         
         if lobby:
             guild = self.message.guild
-            settings = await db.settings.find_one({"_id": str(guild.id)})
-            waiting_room_id = settings.get("waiting_room_id") if settings else None
-            waiting_room = guild.get_channel(waiting_room_id) if waiting_room_id else None
+            config = await db.get_guild_config(guild.id)
+            waiting_room_id = config.get("waiting_room_id")
+            waiting_room = guild.get_channel(int(waiting_room_id)) if waiting_room_id else None
 
             move_tasks = []
             delete_tasks = []
-
+            
             for vc_key in ("radiant_vc", "dire_vc"):
                 if vc_id := lobby.get(vc_key):
                     if vc := guild.get_channel(vc_id):
@@ -188,13 +204,14 @@ class AdminLobbyView(discord.ui.View):
         guild = self.message.guild
         radiant = lobby["radiant"]
         dire = lobby["dire"]
-        settings = await db.settings.find_one({"_id": str(guild.id)})
-        current_season = settings.get("current_season", 1) if settings else 1
+        
+        config = await db.get_guild_config(guild.id)
+        current_season = config.get("current_season", 1)
         
         all_players_data = []
         for is_radiant_win, team in [(winner == "radiant", radiant), (winner == "dire", dire)]:
             for pos, uid in team.items():
-                if uid and not str(uid).startswith("1000000000000000"):
+                if uid and not is_dummy_player(uid):
                     all_players_data.append({"uid": uid, "pos": pos, "is_winner": is_radiant_win})
 
         uids_to_fetch = [p["uid"] for p in all_players_data]
@@ -257,12 +274,12 @@ class AdminLobbyView(discord.ui.View):
         }
         await db.match_history.insert_one(history_doc)
         
-        waiting_room_id = settings.get("waiting_room_id") if settings else None
-        waiting_room = guild.get_channel(waiting_room_id) if waiting_room_id else None
+        waiting_room_id = config.get("waiting_room_id")
+        waiting_room = guild.get_channel(int(waiting_room_id)) if waiting_room_id else None
 
         move_tasks = []
         delete_tasks = []
-
+        
         for vc_key in ("radiant_vc", "dire_vc"):
             if vc_id := lobby.get(vc_key):
                 if vc := guild.get_channel(vc_id):
@@ -279,8 +296,8 @@ class AdminLobbyView(discord.ui.View):
         host = guild.get_member(int(lobby["host_id"]))
         
         embed = WindrangerEmbed.match_result(self.lobby_id, host, guild, radiant, dire, winner, self.emojis)
-        history_channel_id = settings.get("history_channel_id") if settings else None
-        history_channel = guild.get_channel(history_channel_id) if history_channel_id else None
+        history_channel_id = config.get("history_channel_id")
+        history_channel = guild.get_channel(int(history_channel_id)) if history_channel_id else None
 
         if history_channel:
             await history_channel.send(embed=embed)
@@ -303,9 +320,10 @@ class AdminLobbyView(discord.ui.View):
         
         for child in self.children:
             child.disabled = True
+            
         await asyncio.gather(
             interaction.edit_original_response(view=self),
-            interaction.followup.send(f"✅ Матч завершен! Победили **{'Свет' if winner == 'radiant' else 'Тьма'}**.\nМатч записан в историю.", ephemeral=True)
+            interaction.followup.send(f"✅ Матч завершен! Победили **{'Radiant' if winner == 'radiant' else 'Dire'}**.\nМатч записан в историю.", ephemeral=True)
         )
 
 class LobbyView(discord.ui.View):
@@ -345,12 +363,12 @@ class LobbyView(discord.ui.View):
         db = self.bot.db
         guild_id = str(interaction.guild.id)
         
-        settings = await db.settings.find_one({"_id": guild_id})
-        if settings and (waiting_room_id := settings.get("waiting_room_id")):
-            waiting_vc = interaction.guild.get_channel(waiting_room_id)
+        config = await db.get_guild_config(guild_id)
+        if waiting_room_id := config.get("waiting_room_id"):
+            waiting_vc = interaction.guild.get_channel(int(waiting_room_id))
             if waiting_vc:
                 member = interaction.guild.get_member(interaction.user.id)
-                if not member or not member.voice or member.voice.channel.id != waiting_room_id:
+                if not member or not member.voice or member.voice.channel.id != int(waiting_room_id):
                     return await interaction.followup.send(f"❌ Сначала зайди в голосовой канал {waiting_vc.mention}!", ephemeral=True)
 
         user_data = await db.users.find_one({"_id": user_id, "guild_id": guild_id})
@@ -362,13 +380,7 @@ class LobbyView(discord.ui.View):
         existing_lobby = await db.active_lobbies.find_one({
             "guild_id": guild_id,
             "_id": {"$ne": self.lobby_id},
-            "$or": [
-                {f"slots.pos{i}": user_id} for i in range(1, 6)
-            ] + [
-                {f"radiant.pos{i}": user_id} for i in range(1, 6)
-            ] + [
-                {f"dire.pos{i}": user_id} for i in range(1, 6)
-            ]
+            "all_players": user_id
         })
 
         if existing_lobby:
@@ -380,6 +392,7 @@ class LobbyView(discord.ui.View):
             return await interaction.followup.send("❌ Лобби закрыто или уже запущено.", ephemeral=True)
 
         slots = lobby["slots"]
+        all_players = lobby.get("all_players", [])
 
         for p, players in slots.items():
             if user_id in players:
@@ -391,12 +404,18 @@ class LobbyView(discord.ui.View):
             return await interaction.followup.send("❌ Эта позиция уже занята.", ephemeral=True)
 
         slots[pos].append(user_id)
+        if user_id not in all_players:
+            all_players.append(user_id)
+            
         is_full = all(len(slots[p]) == 2 for p in ["pos1", "pos2", "pos3", "pos4", "pos5"])
         
         host = interaction.guild.get_member(int(lobby["host_id"]))
         embed = WindrangerEmbed.pre_shuffle(self.lobby_id, host, interaction.guild, slots, self.emojis)
 
-        await db.active_lobbies.update_one({"_id": self.lobby_id}, {"$set": {"slots": slots}})
+        await db.active_lobbies.update_one(
+            {"_id": self.lobby_id}, 
+            {"$set": {"slots": slots, "all_players": all_players}}
+        )
         await interaction.message.edit(embed=embed, view=self)
         
         if is_full:
@@ -413,6 +432,7 @@ class LobbyView(discord.ui.View):
         user_id = str(interaction.user.id)
         found = False
         slots = lobby["slots"]
+        all_players = lobby.get("all_players", [])
 
         for players in slots.values():
             if user_id in players:
@@ -423,7 +443,13 @@ class LobbyView(discord.ui.View):
         if not found:
             return
 
-        await db.update_one({"_id": self.lobby_id}, {"$set": {"slots": slots}})
+        if user_id in all_players:
+            all_players.remove(user_id)
+
+        await db.update_one(
+            {"_id": self.lobby_id}, 
+            {"$set": {"slots": slots, "all_players": all_players}}
+        )
         
         host = interaction.guild.get_member(int(lobby["host_id"]))
         embed = WindrangerEmbed.pre_shuffle(self.lobby_id, host, interaction.guild, slots, self.emojis)
@@ -441,10 +467,29 @@ class LobbyCog(commands.Cog):
         )
         self.bot.tree.add_command(self.ctx_menu)
 
+    async def cog_load(self):
+        try:
+            cursor = self.bot.db.active_lobbies.find({
+                "shuffled": False, 
+                "message_id": {"$ne": None}
+            })
+            
+            async for lobby in cursor:
+                guild = self.bot.get_guild(int(lobby["guild_id"]))
+                if guild:
+                    emojis = await self._update_guild_emojis(guild)
+                    self.bot.add_view(
+                        LobbyView(self.bot, lobby["_id"], emojis),
+                        message_id=int(lobby["message_id"])
+                    )
+            logger.info("Persistent views restored successfully.")
+        except Exception as e:
+            logger.error(f"Failed to restore persistent views: {e}", exc_info=True)
+
     async def cog_unload(self):
         self.bot.tree.remove_command(self.ctx_menu.name, type=self.ctx_menu.type)
 
-    async def _update_guild_emojis(self, guild: discord.Guild):
+    async def _update_guild_emojis(self, guild: discord.Guild) -> dict:
         found_emojis = {}
         for emoji in guild.emojis:
             if emoji.name in self.target_emojis:
@@ -453,6 +498,7 @@ class LobbyCog(commands.Cog):
             await self.bot.db.settings.update_one(
                 {"_id": str(guild.id)}, {"$set": {"emojis": found_emojis}}, upsert=True
             )
+            self.bot.db.clear_cache(guild.id)
         return found_emojis
 
     async def check_host_perms(self, interaction: discord.Interaction) -> bool:
@@ -461,9 +507,9 @@ class LobbyCog(commands.Cog):
         if interaction.user.id == interaction.guild.owner_id:
             return True
             
-        settings = await self.bot.db.settings.find_one({"_id": str(interaction.guild.id)})
-        if settings and (host_role_id := settings.get("host_role_id")):
-            role = interaction.guild.get_role(host_role_id)
+        config = await self.bot.db.get_guild_config(interaction.guild.id)
+        if host_role_id := config.get("host_role_id"):
+            role = interaction.guild.get_role(int(host_role_id))
             if role and role in interaction.user.roles:
                 return True
         return False
@@ -490,23 +536,17 @@ class LobbyCog(commands.Cog):
     @app_commands.command(name="lobby", description="Создать новое лобби 5v5")
     @app_commands.default_permissions(manage_messages=True)
     async def create_lobby(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         guild = interaction.guild
-        settings = await self.bot.db.settings.find_one({"_id": str(guild.id)})
+        config = await self.bot.db.get_guild_config(guild.id)
         
-        if not settings or not settings.get("reg_channel_id"):
+        reg_channel_id = config.get("reg_channel_id")
+        if not reg_channel_id:
             return await interaction.followup.send("❌ Инфраструктура не настроена. Используйте `/setup`.", ephemeral=True)
 
         emojis = await self._update_guild_emojis(guild)
-        
-        counter = await self.bot.db.counters.find_one_and_update(
-            {"_id": "lobby_sequence"},
-            {"$inc": {"seq": 1}},
-            upsert=True,
-            return_document=ReturnDocument.AFTER
-        )
-        lobby_seq = counter["seq"]
+        lobby_seq = await self.bot.db.get_next_lobby_id(guild.id)
         lobby_id = f"lobby_{lobby_seq}"
 
         lobby_data = {
@@ -515,6 +555,7 @@ class LobbyCog(commands.Cog):
             "host_id": str(interaction.user.id), 
             "message_id": None,                  
             "shuffled": False,
+            "all_players": [],
             "slots": {"pos1": [], "pos2": [], "pos3": [], "pos4": [], "pos5": []},
             "radiant": {},
             "dire": {}
@@ -524,19 +565,14 @@ class LobbyCog(commands.Cog):
         view = LobbyView(self.bot, lobby_id, emojis)
         embed = WindrangerEmbed.pre_shuffle(lobby_id, interaction.user, guild, lobby_data["slots"], emojis)
 
-        reg_channel = guild.get_channel(settings["reg_channel_id"])
+        reg_channel = guild.get_channel(int(reg_channel_id))
         if not reg_channel:
             return await interaction.followup.send("❌ Канал регистрации не найден. Повторите `/setup`.", ephemeral=True)
 
         msg = await reg_channel.send(embed=embed, view=view)
         await self.bot.db.active_lobbies.update_one({"_id": lobby_id}, {"$set": {"message_id": str(msg.id)}})
         
-        await interaction.followup.send(f"✅ Лобби создано в <#{reg_channel.id}>!")
-        await asyncio.sleep(10)
-        try:
-            await interaction.delete_original_response()
-        except discord.HTTPException:
-            pass
+        await interaction.followup.send(f"✅ Лобби создано в <#{reg_channel.id}>!", ephemeral=True)
 
     @app_commands.command(name="fill", description="[ADMIN] Заполнить последнее лобби ботами")
     @app_commands.default_permissions(administrator=True)
@@ -547,21 +583,27 @@ class LobbyCog(commands.Cog):
         lobby = await db.find_one({"guild_id": str(interaction.guild.id), "shuffled": False}, sort=[("_id", -1)])
         
         if not lobby:
-            return await interaction.followup.send("❌ Нет открытых лобби для заполнения.")
+            return await interaction.followup.send("❌ Нет открытых лобби для заполнения.", ephemeral=True)
 
         dummy_ids = [str(100000000000000000 + i) for i in range(10)]
         slots = lobby["slots"]
+        all_players = lobby.get("all_players", [])
         
         idx = 0
         for pos in ["pos1", "pos2", "pos3", "pos4", "pos5"]:
             while len(slots[pos]) < 2:
-                slots[pos].append(dummy_ids[idx])
+                dummy_id = dummy_ids[idx]
+                slots[pos].append(dummy_id)
+                all_players.append(dummy_id)
                 idx += 1
 
-        await db.update_one({"_id": lobby["_id"]}, {"$set": {"slots": slots}})
+        await db.update_one(
+            {"_id": lobby["_id"]}, 
+            {"$set": {"slots": slots, "all_players": all_players}}
+        )
         
-        settings = await self.bot.db.settings.find_one({"_id": str(interaction.guild.id)})
-        reg_channel = interaction.guild.get_channel(settings["reg_channel_id"])
+        config = await self.bot.db.get_guild_config(interaction.guild.id)
+        reg_channel = interaction.guild.get_channel(int(config["reg_channel_id"]))
         
         try:
             msg = await reg_channel.fetch_message(int(lobby["message_id"]))
@@ -573,18 +615,12 @@ class LobbyCog(commands.Cog):
             await msg.edit(embed=embed, view=view)
             
             await reg_channel.send(f"🎉 Лобби 10/10 собрано! <@{lobby['host_id']}>, запусти матч через `⚙️ Управление лобби`.")
-            await interaction.followup.send("✅ Лобби успешно заполнено.")
+            await interaction.followup.send("✅ Лобби успешно заполнено.", ephemeral=True)
         except discord.NotFound:
             await db.delete_one({"_id": lobby["_id"]})
-            await interaction.followup.send("❌ Найдены устаревшие данные о лобби («призрак»). База данных очищена. Попробуйте выполнить команду `/fill` ещё раз.", ephemeral=True)
+            await interaction.followup.send("❌ Найдены устаревшие данные о лобби («призрак»). База очищена.", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Ошибка обновления сообщения: {e}")
-
-        await asyncio.sleep(10)
-        try:
-            await interaction.delete_original_response()
-        except discord.HTTPException:
-            pass
+            await interaction.followup.send(f"⚠️ Ошибка обновления сообщения: {e}", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(LobbyCog(bot))

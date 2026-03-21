@@ -1,6 +1,5 @@
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
 
 def setup_logging():
     root_logger = logging.getLogger()
@@ -19,17 +18,7 @@ def setup_logging():
     console_handler.setFormatter(formatter)
     console_handler.setLevel(logging.INFO)
 
-    file_handler = RotatingFileHandler(
-        filename='bot.log', 
-        encoding='utf-8', 
-        maxBytes=5 * 1024 * 1024,
-        backupCount=5
-    )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.DEBUG)
-
     root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
     
     logging.getLogger('discord').setLevel(logging.INFO)
     logging.getLogger('discord.http').setLevel(logging.WARNING)

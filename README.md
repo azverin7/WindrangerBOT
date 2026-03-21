@@ -33,7 +33,7 @@
 Configure Environment Variables:
 Create a .env file in the root directory:
 
-Фрагмент кода
+Code fragment
 BOT_TOKEN=your_discord_bot_token_here
 MONGO_URI=mongodb://mongo:27017/windranger
 DEVELOPER_ID=your_discord_user_id

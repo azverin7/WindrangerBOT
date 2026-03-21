@@ -1,0 +1,12 @@
+{
+  "not_your_panel": "❌ This is not your history panel.",
+  "page_indicator": "Page {current}/{total}",
+  "season_choice": "Season {season}",
+  "history_empty": "❌ Match history for Season {season} is empty.",
+  "history_title": "🕒 Season {season} | Match #{short_id}",
+  "you": "You",
+  "target": "{name}",
+  "season_stats_empty": "❌ {who} haven't played any matches in Season {season}.",
+  "season_stats_title": "📊 Season {season} | Stats: {name}",
+  "requested_by": "Requested by: {name}"
+}

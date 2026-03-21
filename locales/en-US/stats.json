@@ -1,0 +1,11 @@
+{
+  "err_wrong_channel": "❌ This command can only be used in the <#{channel_id}> channel.",
+  "lb_refreshed": "✅ Leaderboard successfully refreshed/restored.",
+  "pts_updated": "✅ PTS for {name} in season {season} set to {pts}.",
+  "no_matches": "{who} have no matches played in season {season}.",
+  "no_matches_season": "No matches played yet in season {season}.",
+  "embed_title": "Statistics | Season {season}",
+  "requested_by": "Requested by: {name}",
+  "you": "You",
+  "target": "Player {name}"
+}

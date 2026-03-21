@@ -1,5 +1,6 @@
 import asyncio
 import logging
+
 import discord
 from discord.ext import commands
 import uvloop
@@ -18,12 +19,12 @@ async def sync(ctx):
     await ctx.message.delete()
     try:
         synced = await bot.tree.sync()
-        logger.info(f"Синхронизировано {len(synced)} слэш-команд.")
-        msg = await ctx.send(f"✅ Синхронизировано {len(synced)} команд.")
+        logger.info(f"Synced {len(synced)} app commands.")
+        msg = await ctx.send(f"✅ Synced {len(synced)} commands.")
         await msg.delete(delay=5)
     except Exception as e:
         logger.error(f"Failed to sync commands: {e}", exc_info=True)
-        msg = await ctx.send(f"❌ Ошибка синхронизации: {e}")
+        msg = await ctx.send(f"❌ Sync error: {e}")
         await msg.delete(delay=5)
 
 async def main():

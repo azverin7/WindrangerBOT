@@ -1,0 +1,15 @@
+{
+  "Manage Lobby": "Manage Lobby",
+  "Create a new 5v5 lobby": "Create a new 5v5 lobby",
+  "[ADMIN] Fill the last lobby with bots": "[ADMIN] Fill the last lobby with bots",
+  "Show player statistics for the current season": "Show player statistics for the current season",
+  "Show the top 10 players of the current season": "Show the top 10 players of the current season",
+  "[ADMIN] Manually set a player's MMR": "[ADMIN] Manually set a player's MMR",
+  "Show match history for the server": "Show match history for the server",
+  "Show player statistics for a specific season": "Show player statistics for a specific season",
+  "[ADMIN] Delete old infrastructure and create a new one": "[ADMIN] Delete old infrastructure and create a new one",
+  "[HOST] Clear messages in the current channel": "[HOST] Clear messages in the current channel",
+  "[ADMIN] Delete all bot channels and categories": "[ADMIN] Delete all bot channels and categories",
+  "[OWNER] FULL DATABASE WIPE. Deletes stats, lobbies, history.": "[OWNER] FULL DATABASE WIPE. Deletes stats, lobbies, history.",
+  "[HOST] Remove matchmaking ban from a player": "[HOST] Remove matchmaking ban from a player"
+}

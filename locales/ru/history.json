@@ -1,0 +1,12 @@
+{
+  "not_your_panel": "❌ Это не ваша панель истории.",
+  "page_indicator": "Стр. {current}/{total}",
+  "season_choice": "Сезон {season}",
+  "history_empty": "❌ История матчей для Сезона {season} пуста.",
+  "history_title": "🕒 Сезон {season} | Клоз #{short_id}",
+  "you": "У Вас",
+  "target": "У {name}",
+  "season_stats_empty": "❌ {who} нет сыгранных матчей в Сезоне {season}.",
+  "season_stats_title": "📊 Сезон {season} | Статистика: {name}",
+  "requested_by": "Запросил: {name}"
+}

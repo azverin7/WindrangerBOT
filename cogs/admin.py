@@ -1,31 +1,66 @@
+import asyncio
+import logging
 import discord
 from discord.ext import commands
-import logging
-
-from database.mongo import db
-from utils.checks import is_privileged
+from discord import app_commands
+from core.config import DEVELOPER_ID
 
 logger = logging.getLogger('windranger.admin')
+
+def is_admin_or_dev():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        user = interaction.user
+        if user.id == int(DEVELOPER_ID):
+            return True
+            
+        guild = interaction.guild
+        if not guild:
+            return False
+            
+        if user.id == guild.owner_id:
+            return True
+            
+        if isinstance(user, discord.Member) and user.guild_permissions.administrator:
+            return True
+            
+        settings = await interaction.client.db.settings.find_one({"_id": str(guild.id)})
+        if settings and (host_role_id := settings.get("host_role_id")):
+            role = guild.get_role(host_role_id)
+            if role and role in user.roles:
+                return True
+                
+        return False
+    return app_commands.check(predicate)
+
+def is_owner_or_dev():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        user_id = interaction.user.id
+        if user_id == int(DEVELOPER_ID):
+            return True
+        if interaction.guild and user_id == interaction.guild.owner_id:
+            return True
+        return False
+    return app_commands.check(predicate)
 
 class AdminCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    async def _purge_infrastructure(self, guild: discord.Guild) -> int:
-        deleted_count = 0
-        guild_id = str(guild.id)
-        
-        config = await db.get_guild_config(guild.id)
-        target_categories = []
-        
-        if config and config.get("category_id"):
-            db_cat = guild.get_channel(config["category_id"])
-            if db_cat:
-                target_categories.append(db_cat)
-                
+    async def _cleanup_infrastructure(self, guild: discord.Guild) -> int:
+        settings = await self.bot.db.settings.find_one({"_id": str(guild.id)})
+        target_categories = set()
+
+        if settings and (reg_channel_id := settings.get("reg_channel_id")):
+            reg_channel = guild.get_channel(int(reg_channel_id))
+            if reg_channel and reg_channel.category:
+                target_categories.add(reg_channel.category)
+
         for cat in guild.categories:
-            if ("dota" in cat.name.lower() or "closes" in cat.name.lower()) and cat not in target_categories:
-                target_categories.append(cat)
+            cat_name = cat.name.lower()
+            if any(keyword in cat_name for keyword in ("dota", "closes", "inhouses")):
+                target_categories.add(cat)
+
+        deleted_count = 0
 
         for cat in target_categories:
             for channel in cat.channels:
@@ -33,200 +68,162 @@ class AdminCog(commands.Cog):
                     await channel.delete()
                     deleted_count += 1
                 except discord.HTTPException as e:
-                    logger.warning(f"Не удалось удалить канал {channel.name}: {e}")
+                    logger.warning(f"Failed to delete channel {channel.id}: {e}")
             try:
                 await cat.delete()
                 deleted_count += 1
             except discord.HTTPException as e:
-                logger.warning(f"Не удалось удалить категорию {cat.name}: {e}")
-                
+                logger.warning(f"Failed to delete category {cat.id}: {e}")
+
         return deleted_count
 
-    async def _build_infrastructure(self, ctx, guild_id):
-        cat_overwrites = {
-            ctx.guild.default_role: discord.PermissionOverwrite(send_messages=True)
-        }
-        
-        readonly_overwrites = {
-            ctx.guild.default_role: discord.PermissionOverwrite(send_messages=False),
-            ctx.guild.me: discord.PermissionOverwrite(send_messages=True, embed_links=True)
-        }
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.CheckFailure):
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ У вас нет прав для использования этой команды.", ephemeral=True)
+        else:
+            logger.error(f"AppCommand error in AdminCog: {error}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Произошла внутренняя ошибка.", ephemeral=True)
 
-        category = await ctx.guild.create_category("dota 2 closes space", overwrites=cat_overwrites)
-        
-        chat_ch = await category.create_text_channel("chat")
-        leaderboard_ch = await category.create_text_channel("leaderboard", overwrites=readonly_overwrites)
-        stats_ch = await category.create_text_channel("stats")
-        history_ch = await category.create_text_channel("history", overwrites=readonly_overwrites)
-        reg_ch = await category.create_text_channel("reg")
+    @app_commands.command(name="setup", description="[ADMIN] Снести старую инфраструктуру лобби и создать новую")
+    @app_commands.default_permissions(administrator=True)
+    @is_admin_or_dev()
+    async def setup_infra(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
 
-        guide_embed = discord.Embed(
-            title="Руководство по закрытым играм (Клозам)",
-            description="Добро пожаловать! Здесь проходит регистрация.",
-            color=0x3498db
-        )
-        guide_embed.add_field(
-            name="ИГРОКАМ: Как участвовать",
-            value=(
-                "В зависимости от настроек сервера, регистрация происходит через реакции, кнопки или команды в чат.\n"
-                "• **1️⃣-5️⃣** или команды **!1-!5 <ID>** — Занять позицию (Carry, Mid, Offlane, Soft Supp, Hard Supp).\n"
-                "• **❌** или команда **!out** — Покинуть лобби.\n"
-                "> *Перед регистрацией необходимо находиться в голосовом канале 'Ожидание клоза'.*"
-            ),
-            inline=False
-        )
-        guide_embed.add_field(
-            name="ХОСТАМ: Управление лобби",
-            value=(
-                "• `!create` (или `!c`) — Создать лобби.\n"
-                "• `!start <ID>` (или `!s`) — Запустить матч (авто-баланс, войсы, рассылка паролей).\n"
-                "• `!cancel <ID>` — Отменить сбор.\n"
-                "• `!win <ID> radiant ` (или `!win <ID> dire`) — Завершить матч и начислить PTS."
-            ),
-            inline=False
-        )
-        guide_embed.set_footer(text="Админ-команды: !viewmode [1-5] - изменить режим отображения, !clear - очистить чат. (по стандарту 10 сообщений)")
-        
-        await reg_ch.send(embed=guide_embed)
-        
-        vc_overwrites = {
-            ctx.guild.default_role: discord.PermissionOverwrite(connect=True, view_channel=True)
-        }
-        waiting_vc = await category.create_voice_channel("Ожидание клоза", overwrites=vc_overwrites)
-        
-        await db.settings.update_one(
-            {"_id": str(guild_id)},
-            {
-                "$set": {
-                    "category_id": int(category.id),
-                    "chat_channel_id": int(chat_ch.id),
-                    "reg_channel_id": int(reg_ch.id),
-                    "history_channel_id": int(history_ch.id),
-                    "stats_channel_id": int(stats_ch.id),
-                    "leaderboard_channel_id": int(leaderboard_ch.id),
-                    "waiting_vc_id": int(waiting_vc.id),
-                    "view_mode": 1
-                }
-            },
+        await self._cleanup_infrastructure(guild)
+
+        category = await guild.create_category("dota 2 closes space")
+        hist_ch = await guild.create_text_channel("history", category=category)
+        stats_ch = await guild.create_text_channel("stats", category=category)
+        lb_ch = await guild.create_text_channel("leaderboard", category=category)
+        reg_ch = await guild.create_text_channel("registration", category=category)
+        wait_vc = await guild.create_voice_channel("Ожидание клоза", category=category)
+
+        role = discord.utils.get(guild.roles, name="host")
+        if not role:
+            role = await guild.create_role(name="host", color=discord.Color.blue())
+
+        await self.bot.db.settings.update_one(
+            {"_id": str(guild.id)},
+            {"$set": {
+                "reg_channel_id": reg_ch.id,
+                "history_channel_id": hist_ch.id,
+                "stats_channel_id": stats_ch.id,
+                "leaderboard_channel_id": lb_ch.id,
+                "waiting_room_id": wait_vc.id,
+                "host_role_id": role.id
+            }},
             upsert=True
         )
-        db.clear_cache(guild_id)
 
-    @commands.command(name="setup", aliases=["init", "rebuild"])
-    @is_privileged(grand_only=True)
-    async def setup_infrastructure(self, ctx: commands.Context):
-        msg = await ctx.send("⚙️ Инициализация инфраструктуры бота. Пожалуйста, подождите...")
-        guild_id = ctx.guild.id
-        
-        deleted = await self._purge_infrastructure(ctx.guild)
+        await interaction.followup.send("✅ Старая инфраструктура удалена, новая успешно создана и привязана к базе.")
+
+    @app_commands.command(name="clear", description="[HOST] Очистить сообщения в текущем канале")
+    @app_commands.describe(amount="Количество сообщений для удаления (1-100)")
+    @is_admin_or_dev()
+    async def clear_chat(self, interaction: discord.Interaction, amount: int = 10):
+        if not (1 <= amount <= 100):
+            return await interaction.response.send_message("⚠️ Укажите количество от 1 до 100.", ephemeral=True)
+            
+        await interaction.response.defer(ephemeral=True)
         
         try:
-            if deleted > 0:
-                try: await msg.edit(content=f"🔄 Обнаружена старая конфигурация. Удалено объектов: {deleted}. Создаю новую...")
-                except discord.NotFound: pass
-            
-            await db.lobbies.delete_many({"guild_id": guild_id})
-            await db.history.delete_many({"guild_id": guild_id})
-            
-            await db.settings.update_one(
-                {"_id": f"counters_{guild_id}"}, 
-                {"$set": {"lobby_sequence": 0, "match_sequence": 0}},
-                upsert=True
+            deleted = await interaction.channel.purge(limit=amount)
+            await interaction.followup.send(f"🧹 Чат очищен. Удалено сообщений: **{len(deleted)}**.")
+        except discord.Forbidden:
+            await interaction.followup.send("❌ У бота нет прав на удаление сообщений (Manage Messages) в этом канале.")
+        except discord.HTTPException as e:
+            logger.error(f"Failed to clear chat in {interaction.channel.id}: {e}")
+            await interaction.followup.send("❌ Произошла ошибка при попытке очистить чат сервера.")
+
+    @app_commands.command(name="cleanup_infra", description="[ADMIN] Удалить все каналы и категории бота (без создания новых)")
+    @app_commands.default_permissions(administrator=True)
+    @is_admin_or_dev()
+    async def cleanup_infra(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        
+        deleted_count = await self._cleanup_infrastructure(guild)
+
+        await self.bot.db.settings.update_one(
+            {"_id": str(guild.id)},
+            {"$unset": {
+                "reg_channel_id": "",
+                "history_channel_id": "",
+                "stats_channel_id": "",
+                "leaderboard_channel_id": "",
+                "waiting_room_id": ""
+            }}
+        )
+
+        try:
+            await interaction.followup.send(f"✅ Инфраструктура удалена. Удалено объектов: **{deleted_count}**.")
+        except discord.NotFound:
+            pass
+
+    @app_commands.command(name="hard_reset", description="[OWNER] ПОЛНЫЙ ВАЙП БАЗЫ. Удаляет статистику, лобби, историю и сбрасывает сезон.")
+    @app_commands.describe(confirm="Напишите CONFIRM заглавными буквами для подтверждения")
+    @is_owner_or_dev()
+    async def hard_reset_server(self, interaction: discord.Interaction, confirm: str):
+        if confirm != "CONFIRM":
+            return await interaction.response.send_message(
+                "⚠️ **ВНИМАНИЕ:** Эта команда безвозвратно удалит ВСЮ статистику, историю матчей, лобби и обнулит сезоны.\n"
+                "Для подтверждения вызовите команду снова и впишите `CONFIRM`.", 
+                ephemeral=True
             )
-            
-            await self._build_infrastructure(ctx, guild_id)
-            
-            status_text = "✨ Инфраструктура успешно создана и бот готов к работе!"
-            if deleted > 0: status_text = "🔄 Инфраструктура успешно обновлена и пересоздана!"
-                
-            try:
-                await msg.edit(content=status_text)
-            except discord.NotFound:
-                config = await db.get_guild_config(guild_id)
-                if config and config.get("chat_channel_id"):
-                    new_chat = ctx.guild.get_channel(config["chat_channel_id"])
-                    if new_chat: await new_chat.send(f"{ctx.author.mention}, {status_text}")
 
-            logger.info(f"Setup completed by {ctx.author}. Guild: {guild_id}. Old objects purged: {deleted}.")
-            
-        except discord.Forbidden:
-            error_text = "❌ Ошибка: У бота не хватает прав. Выдайте боту права Администратора (Administrator)."
-            try: await msg.edit(content=error_text)
-            except discord.NotFound: await ctx.author.send(error_text)
-            logger.error(f"Setup failed on guild {guild_id}: Missing permissions.")
-        except Exception as e:
-            try: await msg.edit(content="❌ Произошла непредвиденная ошибка при настройке сервера.")
-            except discord.NotFound: pass
-            logger.error(f"Setup failed on guild {guild_id}: {e}")
+        await interaction.response.defer(ephemeral=True)
+        guild_id = str(interaction.guild.id)
 
-    @commands.command(name="viewmode")
-    @is_privileged(grand_only=True)
-    async def set_view_mode(self, ctx: commands.Context, mode: int):
-        try: await ctx.message.delete()
-        except: pass
-
-        if mode not in [1, 2, 3, 4, 5]:
-            return await ctx.send("Доступные режимы: 1, 2, 3, 4, 5.", delete_after=5)
-
-        guild_id = ctx.guild.id
-
-        await db.settings.update_one(
-            {"_id": str(guild_id)},
-            {"$set": {"view_mode": mode}},
-            upsert=True
-        )
-        db.clear_cache(guild_id)
-
-        lobby_cog = self.bot.get_cog("LobbyCog")
-        updated = 0
-        
-        if lobby_cog:
-            cursor = db.lobbies.find({"guild_id": guild_id, "active": False})
-            lobbies = await cursor.to_list(length=None)
-            config = await db.get_guild_config(guild_id)
-            reg_channel_id = config.get("reg_channel_id")
-            
-            for lobby in lobbies:
-                channel_id = lobby.get("channel_id") or reg_channel_id
-                channel = ctx.guild.get_channel(channel_id) if channel_id else None
-                if not channel: continue
-                
-                try:
-                    msg = await channel.fetch_message(lobby["status_msg_id"])
-                    await lobby_cog.update_lobby_message(lobby["lobby_id"], ctx.guild)
-                    
-                    if mode in [4, 5]:
-                        emojis_to_add = []
-                        default_nums = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣"}
-                        for i in range(1, 6):
-                            custom_emo = discord.utils.get(ctx.guild.emojis, name=f"pos{i}")
-                            emojis_to_add.append(custom_emo if custom_emo else default_nums[i])
-                        emojis_to_add.append("❌")
-                        
-                        for emo in emojis_to_add: 
-                            await msg.add_reaction(emo)
-                    else:
-                        await msg.clear_reactions()
-                        
-                    updated += 1
-                except Exception as e:
-                    logger.error(f"Error updating viewmode for lobby {lobby['lobby_id']}: {e}")
-
-        await ctx.send(f"Системный режим изменен на **{mode}**. Обновлено лобби на лету: {updated}.", delete_after=10)
-
-    @commands.command(name="clear", aliases=["purge", "clean"])
-    @is_privileged()
-    async def clear_chat(self, ctx: commands.Context, amount: int = 10):
-        if amount < 1 or amount > 1000:
-            return await ctx.send("⚠️ Укажите количество от 1 до 1000.", delete_after=5)
-            
         try:
-            deleted = await ctx.channel.purge(limit=amount + 1)
-            await ctx.send(f"🧹 Чат очищен. Удалено сообщений: **{len(deleted) - 1}**.", delete_after=3)
-        except discord.Forbidden:
-            await ctx.send("❌ У бота нет прав на удаление сообщений (Manage Messages).", delete_after=5)
-        except discord.HTTPException:
-            await ctx.send("❌ Произошла ошибка при попытке очистить чат.", delete_after=5)
+            cursor = self.bot.db.active_lobbies.find({"guild_id": guild_id})
+            
+            async for lobby in cursor:
+                for vc_key in ("radiant_vc", "dire_vc"):
+                    if vc_id := lobby.get(vc_key):
+                        if vc := interaction.guild.get_channel(int(vc_id)):
+                            try:
+                                await vc.delete()
+                            except discord.HTTPException as e:
+                                logger.warning(f"Failed to delete VC {vc_id} during hard reset: {e}")
+
+            await self.bot.db.users.delete_many({"guild_id": guild_id})
+            await self.bot.db.match_history.delete_many({"guild_id": guild_id})
+            await self.bot.db.active_lobbies.delete_many({"guild_id": guild_id})
+            await self.bot.db.settings.delete_one({"_id": f"counters_{guild_id}"})
+            
+            await self.bot.db.settings.update_one(
+                {"_id": guild_id}, 
+                {"$set": {"current_season": 1}}
+            )
+
+            if stats_cog := self.bot.get_cog("StatsCog"):
+                await stats_cog.update_leaderboard(interaction.guild)
+
+            logger.info(f"HARD RESET executed by {interaction.user.id} on Guild: {guild_id}")
+            await interaction.followup.send("✅ База данных сервера полностью очищена. Сезоны сброшены, статистика удалена.")
+
+        except Exception as e:
+            logger.error(f"Error during hard reset on guild {guild_id}: {e}", exc_info=True)
+            await interaction.followup.send("❌ Произошла критическая ошибка при очистке базы данных.")
+
+    @app_commands.command(name="unban", description="[HOST] Снять блокировку регистрации с игрока")
+    @is_admin_or_dev()
+    async def unban_player(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        
+        result = await self.bot.db.users.update_one(
+            {"_id": str(member.id), "guild_id": str(interaction.guild.id)},
+            {"$unset": {"ban_expires": ""}}
+        )
+        
+        if result.modified_count > 0:
+            await interaction.followup.send(f"✅ Блокировка снята с игрока {member.mention}.")
+        else:
+            await interaction.followup.send(f"⚠️ Игрок {member.mention} не был забанен или не найден в БД.")
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))

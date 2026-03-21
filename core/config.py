@@ -1,20 +1,22 @@
 import os
+from typing import Final, Dict
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- ОСНОВНЫЕ НАСТРОЙКИ ---
-TOKEN = os.getenv("TOKEN")
-MONGO_URL = os.getenv("MONGO_URL")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "windrangerbot_v2")
+DISCORD_TOKEN: Final[str] = os.getenv("DISCORD_TOKEN") or ""
+MONGO_URL: Final[str] = os.getenv("MONGO_URL") or ""
+MONGO_DB_NAME: Final[str] = os.getenv("MONGO_DB_NAME", "windrangerbot_v3")
 
-if not TOKEN or not MONGO_URL:
-    raise ValueError("CRITICAL ERROR: Отсутствует TOKEN или MONGO_URL в файле .env!")
+if not DISCORD_TOKEN or not MONGO_URL:
+    raise ValueError("CRITICAL ERROR: DISCORD_TOKEN or MONGO_URL missing in .env")
 
-DEVELOPER_ID = int(os.getenv("DEVELOPER_ID", 0))
+try:
+    DEVELOPER_ID: Final[int] = int(os.getenv("DEVELOPER_ID", "0"))
+except ValueError:
+    raise ValueError("CRITICAL ERROR: DEVELOPER_ID must be int")
 
-# --- КОНСТАНТЫ ИГРОВОЙ ЛОГИКИ ---
-ROLE_MAP = {
+ROLE_MAP: Final[Dict[str, str]] = {
     "1": "Carry",
     "2": "Mid",
     "3": "Offlane",
@@ -22,15 +24,13 @@ ROLE_MAP = {
     "5": "Hard Support"
 }
 
-# --- ЦВЕТОВАЯ ПАЛИТРА ---
-COLOR_MAIN = 0x3498db    
-COLOR_SUCCESS = 0x2ecc71 
-COLOR_ERROR = 0xe74c3c   
+COLOR_MAIN: Final[int] = 0x3498db
+COLOR_SUCCESS: Final[int] = 0x2ecc71
+COLOR_ERROR: Final[int] = 0xe74c3c
 
-# --- ЭМОДЗИ ДЛЯ ИНТЕРФЕЙСА ---
-E_MEDALS = {
+E_MEDALS: Final[Dict[int, str]] = {
     1: "🥇",
     2: "🥈",
     3: "🥉"
 }
-E_TROPHY = "🏆"
+E_TROPHY: Final[str] = "🏆"

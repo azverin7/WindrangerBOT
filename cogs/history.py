@@ -1,186 +1,140 @@
-from typing import Optional
-
+from typing import Optional, List
 import discord
+from discord import app_commands
 from discord.ext import commands
+import logging
 
-from database.mongo import db
-from core.config import ROLE_MAP, E_MEDALS, E_TROPHY
-from utils.factory import UIHandler
+from utils.embeds import WindrangerEmbed
+
+logger = logging.getLogger('windranger.history')
+
+class PaginationView(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction, embeds: List[discord.Embed]):
+        super().__init__(timeout=180)
+        self.embeds = embeds
+        self.current_page = 0
+        self.interaction = interaction
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.btn_prev.disabled = self.current_page == 0
+        self.btn_next.disabled = self.current_page == len(self.embeds) - 1
+        self.lbl_page.label = f"Стр. {self.current_page + 1}/{len(self.embeds)}"
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.primary, custom_id="prev")
+    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+
+    @discord.ui.button(label="Стр. 1/1", style=discord.ButtonStyle.secondary, disabled=True, custom_id="lbl")
+    async def lbl_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass 
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.primary, custom_id="next")
+    async def btn_next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.interaction.edit_original_response(view=self)
+        except discord.HTTPException:
+            pass
 
 class HistoryCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    def _build_match_embed(self, match: dict, guild: discord.Guild) -> discord.Embed:
-        return UIHandler.create_match_embed(match, guild)
+    async def _get_current_season(self, guild_id: str) -> int:
+        settings = await self.bot.db.settings.find_one({"_id": guild_id})
+        return settings.get("current_season", 1) if settings else 1
 
-    @commands.command(name="match")
-    async def show_match(self, ctx: commands.Context, match_id: int):
-        query = {
-            "guild_id": ctx.guild.id,
-            "$or": [{"match_id": match_id}, {"lobby_id": match_id}]
-        }
-        match = await db.history.find_one(query)
-            
-        if not match:
-            return await ctx.send(f"Клоз №{match_id} не найден на этом сервере.", delete_after=5)
+    async def season_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[int]]:
+        current_season = await self._get_current_season(str(interaction.guild.id))
+        seasons = range(current_season, 0, -1)
+        return [app_commands.Choice(name=f"Сезон {s}", value=s) for s in seasons if str(s).startswith(current)]
 
-        embed = self._build_match_embed(match, ctx.guild)
-        await ctx.send(embed=embed)
-
-    @commands.command(name="history")
-    async def show_history(self, ctx: commands.Context, limit: int = 5, season: Optional[int] = None):
-        limit = max(1, min(limit, 10))
+    @app_commands.command(name="history", description="Показать историю последних матчей сервера")
+    @app_commands.describe(limit="Количество матчей (до 20)", season="Номер сезона (по умолчанию текущий)")
+    @app_commands.autocomplete(season=season_autocomplete)
+    async def show_history(self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 20] = 5, season: Optional[int] = None):
+        await interaction.response.defer()
         
-        query = {"guild_id": ctx.guild.id}
-        if season is not None:
-            query["season"] = season
-
-        cursor = db.history.find(query).sort("ended_at", -1).limit(limit)
+        target_season = season or await self._get_current_season(str(interaction.guild.id))
+        
+        cursor = self.bot.db.match_history.find({
+            "guild_id": str(interaction.guild.id),
+            "season": target_season
+        }).sort("timestamp", -1).limit(limit)
+        
         matches = await cursor.to_list(length=limit)
 
         if not matches:
-            return await ctx.send("История клозов по вашему запросу пуста.", delete_after=5)
+            return await interaction.followup.send(f"❌ История матчей для Сезона {target_season} пуста.")
 
-        embeds = [self._build_match_embed(m, ctx.guild) for m in matches]
-        await ctx.send(embeds=embeds)
+        settings = await self.bot.db.settings.find_one({"_id": str(interaction.guild.id)})
+        emojis = settings.get("emojis", {}) if settings else {}
 
-    @commands.command(name="season_stats")
-    async def show_season_stats(self, ctx: commands.Context, season: int, member: Optional[discord.Member] = None):
-        target = member or ctx.author
-        
-        config = await db.settings.find_one({"_id": str(ctx.guild.id)}) or {}
-        current_season = config.get("current_season", 1)
-
-        is_current = (season == current_season)
-        collection = db.players if is_current else db.archived_players
-        
-        query_params = {"user_id": target.id, "guild_id": ctx.guild.id}
-        if not is_current:
-            query_params["season"] = season
-
-        p_data = await collection.find_one(query_params)
-        
-        if not p_data:
-            who = "У Вас" if target == ctx.author else f"у {target.display_name}"
-            return await ctx.send(f"{who} нет сыгранных клозов на этом сервере в Сезоне {season}.", delete_after=5)
-
-        pts = p_data.get("pts", 1000)
-        total = p_data.get("matches", 0)
-        wins = p_data.get("wins", 0)
-        losses = p_data.get("losses", 0)
-        streak = p_data.get("streak", 0)
-        
-        if total == 0:
-            rank_display = "--"
-        else:
-            rank_query = {"guild_id": ctx.guild.id, "pts": {"$gt": pts}, "matches": {"$gt": 0}}
-            if not is_current:
-                rank_query["season"] = season
-            players_above = await collection.count_documents(rank_query)
-            rank_int = players_above + 1
-            rank_display = E_MEDALS.get(rank_int, f"#{rank_int}")
-
-        raw_wr = (wins / total) if total > 0 else 0
-        wr_percent = int(raw_wr * 100)
-
-        embed = discord.Embed(
-            title=f"Архив Сезона {season}: {target.display_name}", 
-            color=0x3498db,
-            timestamp=discord.utils.utcnow()
-        )
-        embed.set_thumbnail(url=target.display_avatar.url)
-
-        embed.add_field(name="Ранг", value=f"**{rank_display}**", inline=True)
-        embed.add_field(name="Очки (PTS)", value=f"**{pts}**", inline=True)
-        embed.add_field(name="Винрейт", value=f"**{wr_percent}%**", inline=True)
-        
-        embed.add_field(name="Всего игр", value=f"**{total}**", inline=True)
-        embed.add_field(name="Стрик", value=f"**{streak}**", inline=True)
-        embed.add_field(name="W / L", value=f"**{wins} / {losses}**", inline=True)
-
-        embed.add_field(name="\u200b", value="**Статистика по позициям:**", inline=False)
-
-        p_roles = p_data.get("roles", {})
-
-        for pos_id in range(1, 6):
-            pos_str = str(pos_id)
-            r_stats = p_roles.get(pos_str, {})
-            r_w = r_stats.get("wins", 0)
-            r_m = r_stats.get("matches", 0)
-            r_l = r_m - r_w
-            
-            role_icon = UIHandler.get_role_emoji(ctx.guild, pos_str)
-            icon_name = f"{role_icon}" if role_icon else f"Поз {pos_str}"
-            
-            if r_m == 0:
-                wr_str = "--%"
-            else:
-                wr_str = f"{int((r_w / r_m) * 100)}%"
-
-            val_str = f"**{r_w}/{r_l}**\n{wr_str}"
-
-            embed.add_field(
-                name=icon_name, 
-                value=val_str, 
-                inline=True
+        embeds = []
+        for match in matches:
+            host = interaction.guild.get_member(int(match["host_id"]))
+            embed = WindrangerEmbed.match_result(
+                match["lobby_id"], host, interaction.guild, 
+                match["radiant"], match["dire"], match["winner"], emojis
             )
+            embed.title = f"🕒 Сезон {target_season} | Клоз #{match['lobby_id'].split('_')[1][:5]}"
+            embeds.append(embed)
 
-        footer_icon = ctx.guild.icon.url if ctx.guild.icon else None
-        embed.set_footer(text=f"Запросил: {ctx.author.display_name}", icon_url=footer_icon)
-        
-        await ctx.send(embed=embed)
-
-    @commands.command(name="season_top")
-    async def show_season_top(self, ctx: commands.Context, season: int):
-        config = await db.settings.find_one({"_id": str(ctx.guild.id)}) or {}
-        current_season = config.get("current_season", 1)
-
-        is_current = (season == current_season)
-
-        if is_current:
-            cursor = db.players.find({
-                "guild_id": ctx.guild.id, 
-                "matches": {"$gt": 0}
-            }).sort("pts", -1).limit(10)
+        if len(embeds) == 1:
+            await interaction.followup.send(embed=embeds[0])
         else:
-            cursor = db.archived_players.find({
-                "guild_id": ctx.guild.id, 
-                "season": season, 
-                "matches": {"$gt": 0}
-            }).sort("pts", -1).limit(10)
-        
-        tops = await cursor.to_list(length=10)
+            view = PaginationView(interaction, embeds)
+            await interaction.followup.send(embed=embeds[0], view=view)
 
-        title_prefix = "Топ-10 игроков" if is_current else f"Итоги Сезона {season}"
-        embed = discord.Embed(title=f"{title_prefix}: {ctx.guild.name}", color=0xf1c40f)
+    @app_commands.command(name="season_stats", description="Показать статистику игрока за конкретный сезон")
+    @app_commands.describe(season="Номер сезона", member="Игрок (оставьте пустым для своей статистики)")
+    @app_commands.autocomplete(season=season_autocomplete)
+    async def show_season_stats(self, interaction: discord.Interaction, season: int, member: Optional[discord.Member] = None):
+        await interaction.response.defer()
+        target = member or interaction.user
+        guild_id = str(interaction.guild.id)
         
-        if ctx.guild.icon:
-            embed.set_thumbnail(url=ctx.guild.icon.url)
+        current_season = await self._get_current_season(guild_id)
         
-        desc_lines = []
-        
-        if not tops:
-            desc_lines.append(f"*Данные для Сезона {season} не найдены.*")
+        if season == current_season:
+            query = {"_id": str(target.id), "guild_id": guild_id}
         else:
-            for i in range(1, 11):
-                if i <= len(tops):
-                    p = tops[i-1]
-                    pts = p.get("pts", 1000)
-                    w = p.get("wins", 0)
-                    l = p.get("losses", 0)
-                    total = w + l
-                    wr = int((w / total) * 100) if total > 0 else 0
-                    
-                    line = f"**{i}.** <@{p['user_id']}> • **{pts} PTS** • **{w}W / {l}L ({wr}%)**"
-                    desc_lines.append(line)
-                else:
-                    desc_lines.append(f"**{i}.** *Свободный слот*")
+            query = {"_id": f"{target.id}_s{season}", "guild_id": guild_id, "season": season}
 
-        embed.description = "\n\n".join(desc_lines)
-        embed.set_footer(text=f"Запросил: {ctx.author.display_name} • Сезон {season}")
+        p_data = await self.bot.db.users.find_one(query)
+        
+        if not p_data or p_data.get("matches", 0) == 0:
+            who = "У Вас" if target == interaction.user else f"У {target.display_name}"
+            return await interaction.followup.send(f"❌ {who} нет сыгранных матчей в Сезоне {season}.")
 
-        await ctx.send(embed=embed)
+        pts = p_data["mmr"]
+        
+        rank_query = {"guild_id": guild_id, "mmr": {"$gt": pts}, "matches": {"$gt": 0}}
+        if season != current_season:
+             rank_query["season"] = season
+        else:
+             rank_query["season"] = {"$exists": False} 
+
+        players_above = await self.bot.db.users.count_documents(rank_query)
+        rank_int = players_above + 1
+
+        settings = await self.bot.db.settings.find_one({"_id": guild_id})
+        emojis = settings.get("emojis", {}) if settings else {}
+
+        embed = WindrangerEmbed.player_stats(target, p_data, rank_int, emojis)
+        embed.title = f"📊 Сезон {season} | Статистика: {target.display_name}"
+        embed.set_footer(text=f"Запросил: {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        
+        await interaction.followup.send(embed=embed)
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(HistoryCog(bot))

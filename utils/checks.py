@@ -1,31 +1,33 @@
 import discord
 from discord import app_commands
+
 from core.config import DEVELOPER_ID
 
-class SilentCheckFailure(app_commands.CheckFailure):
-    pass
-
-def is_privileged(grand_only: bool = False):
+def is_privileged():
     async def predicate(interaction: discord.Interaction) -> bool:
         user = interaction.user
-        guild = interaction.guild
-
-        if not guild:
-            raise SilentCheckFailure()
-
-        if user.id == int(DEVELOPER_ID) or user.id == guild.owner_id:
+        if user.id == int(DEVELOPER_ID):
             return True
-
+            
+        guild = interaction.guild
+        if not guild:
+            return False
+            
+        if user.id == guild.owner_id:
+            return True
+            
         if isinstance(user, discord.Member) and user.guild_permissions.administrator:
             return True
-
-        if not grand_only:
-            config = await interaction.client.db.get_guild_config(guild.id)
-            if host_role_id := config.get("host_role_id"):
-                role = guild.get_role(host_role_id)
-                if role and isinstance(user, discord.Member) and role in user.roles:
-                    return True
-
-        raise SilentCheckFailure()
-        
+            
+        settings = await interaction.client.db.get_guild_config(guild.id)
+        if settings:
+            gh_role_id = settings.get("grand_host_role_id")
+            if gh_role_id and (gh_role := guild.get_role(int(gh_role_id))) and gh_role in user.roles:
+                return True
+                
+            h_role_id = settings.get("host_role_id")
+            if h_role_id and (h_role := guild.get_role(int(h_role_id))) and h_role in user.roles:
+                return True
+                
+        return False
     return app_commands.check(predicate)

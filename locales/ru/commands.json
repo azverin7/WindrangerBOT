@@ -1,0 +1,15 @@
+{
+  "Manage Lobby": "Управление лобби",
+  "Create a new 5v5 lobby": "Создать новое лобби 5v5",
+  "[ADMIN] Fill the last lobby with bots": "[АДМИН] Заполнить последнее лобби ботами",
+  "Show player statistics for the current season": "Показать статистику игрока в текущем сезоне",
+  "Show the top 10 players of the current season": "Показать топ-10 игроков текущего сезона",
+  "[ADMIN] Manually set a player's MMR": "[АДМИН] Установить MMR игроку вручную",
+  "Show match history for the server": "Показать историю последних матчей сервера",
+  "Show player statistics for a specific season": "Показать статистику игрока за конкретный сезон",
+  "[ADMIN] Delete old infrastructure and create a new one": "[АДМИН] Снести старую инфраструктуру лобби и создать новую",
+  "[HOST] Clear messages in the current channel": "[ХОСТ] Очистить сообщения в текущем канале",
+  "[ADMIN] Delete all bot channels and categories": "[АДМИН] Удалить все каналы и категории бота",
+  "[OWNER] FULL DATABASE WIPE. Deletes stats, lobbies, history.": "[ВЛАДЕЛЕЦ] ПОЛНЫЙ ВАЙП БАЗЫ. Удаляет статистику, лобби, историю.",
+  "[HOST] Remove matchmaking ban from a player": "[ХОСТ] Снять блокировку регистрации с игрока"
+}

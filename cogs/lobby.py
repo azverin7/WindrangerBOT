@@ -1,14 +1,15 @@
 import asyncio
-import logging
 import datetime
+import logging
 import secrets
-from typing import Optional
+from typing import Optional, Tuple
 
 import discord
-from discord.ext import commands
 from discord import app_commands
-from pymongo import UpdateOne, ReturnDocument
+from discord.ext import commands
+from pymongo import UpdateOne
 
+from core.config import DEVELOPER_ID
 from utils.embeds import WindrangerEmbed
 from utils.matchmaking import balance_teams_by_mmr
 from utils.checks import is_privileged
@@ -18,29 +19,71 @@ logger = logging.getLogger('windranger.lobby')
 def is_dummy_player(uid: str | int) -> bool:
     return str(uid).startswith("1000000000000000")
 
+async def get_locales(bot, guild_id: Optional[int], user_id: int) -> Tuple[Optional[str], Optional[str]]:
+    user_loc = await bot.db.get_user_locale(user_id)
+    guild_loc = None
+    if guild_id:
+        config = await bot.db.get_guild_config(guild_id)
+        guild_loc = config.get("locale")
+    return user_loc, guild_loc
+
+async def resolve_locale(bot, interaction: discord.Interaction) -> discord.Locale:
+    u_loc, g_loc = await get_locales(bot, interaction.guild_id, interaction.user.id)
+    res_str = (
+        u_loc or 
+        g_loc or 
+        (interaction.locale.value if interaction.locale else None) or 
+        (interaction.guild_locale.value if interaction.guild_locale else None)
+    )
+    try:
+        return discord.Locale(res_str) if res_str else bot.i18n.default_locale
+    except ValueError:
+        return bot.i18n.default_locale
+
+async def _t(bot, interaction: discord.Interaction, key: str, **kwargs) -> str:
+    u_loc, g_loc = await get_locales(bot, interaction.guild_id, interaction.user.id)
+    return bot.i18n.get_context_string(interaction, "lobby", key, db_user_locale=u_loc, db_guild_locale=g_loc, **kwargs)
+
 class AdminLobbyView(discord.ui.View):
-    def __init__(self, bot, lobby: dict, message: discord.Message, emojis: dict):
+    def __init__(self, bot, lobby: dict, message: discord.Message, emojis: dict, locale: discord.Locale):
         super().__init__(timeout=None)
         self.bot = bot
         self.lobby = lobby
         self.lobby_id = lobby["_id"]
         self.message = message
         self.emojis = emojis
+        self.locale = locale
 
-        btn_cancel = discord.ui.Button(label="Отменить лобби", style=discord.ButtonStyle.danger, custom_id="admin_cancel")
+        btn_cancel = discord.ui.Button(
+            label=self.bot.i18n.get_string(self.locale, "lobby", "btn_cancel"), 
+            style=discord.ButtonStyle.danger, 
+            custom_id="admin_cancel"
+        )
         btn_cancel.callback = self.btn_cancel
         self.add_item(btn_cancel)
 
         if not lobby.get("shuffled"):
-            btn_start = discord.ui.Button(label="▶️ Запустить матч", style=discord.ButtonStyle.primary, custom_id="admin_start")
+            btn_start = discord.ui.Button(
+                label=self.bot.i18n.get_string(self.locale, "lobby", "btn_start"), 
+                style=discord.ButtonStyle.primary, 
+                custom_id="admin_start"
+            )
             btn_start.callback = self.btn_start
             self.add_item(btn_start)
         else:
-            btn_win_rad = discord.ui.Button(label="🏆 Победитель: Radiant", style=discord.ButtonStyle.success, custom_id="admin_win_radiant")
+            btn_win_rad = discord.ui.Button(
+                label=self.bot.i18n.get_string(self.locale, "lobby", "btn_win_radiant"), 
+                style=discord.ButtonStyle.success, 
+                custom_id="admin_win_radiant"
+            )
             btn_win_rad.callback = self.btn_win_radiant
             self.add_item(btn_win_rad)
 
-            btn_win_dir = discord.ui.Button(label="🏆 Победитель: Dire", style=discord.ButtonStyle.success, custom_id="admin_win_dire")
+            btn_win_dir = discord.ui.Button(
+                label=self.bot.i18n.get_string(self.locale, "lobby", "btn_win_dire"), 
+                style=discord.ButtonStyle.success, 
+                custom_id="admin_win_dire"
+            )
             btn_win_dir.callback = self.btn_win_dire
             self.add_item(btn_win_dir)
 
@@ -50,11 +93,11 @@ class AdminLobbyView(discord.ui.View):
         lobby = await db.find_one({"_id": self.lobby_id})
 
         if lobby.get("shuffled"):
-            return await interaction.followup.send("❌ Лобби уже запущено.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "already_started"), ephemeral=True)
 
         slots = lobby["slots"]
         if not all(len(slots[p]) == 2 for p in ("pos1", "pos2", "pos3", "pos4", "pos5")):
-            return await interaction.followup.send("❌ Нельзя запустить лобби: не все слоты заняты (нужно 10/10).", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "slots_not_full"), ephemeral=True)
 
         all_uids = lobby.get("all_players", [])
         if not all_uids:
@@ -67,7 +110,6 @@ class AdminLobbyView(discord.ui.View):
             user_mmrs[udoc["_id"]] = udoc.get("mmr", 1000)
 
         radiant, dire = balance_teams_by_mmr(slots, user_mmrs)
-
         password = str(secrets.randbelow(9000) + 1000)
         
         guild = interaction.guild
@@ -79,15 +121,17 @@ class AdminLobbyView(discord.ui.View):
         dire_vc = None
 
         try:
-            radiant_vc = await guild.create_voice_channel(name=f"🟩 Radiant #{short_id}", category=category)
-            dire_vc = await guild.create_voice_channel(name=f"🟥 Dire #{short_id}", category=category)
+            radiant_name = self.bot.i18n.get_string(self.locale, "lobby", "vc_radiant", short_id=short_id)
+            dire_name = self.bot.i18n.get_string(self.locale, "lobby", "vc_dire", short_id=short_id)
+            radiant_vc = await guild.create_voice_channel(name=radiant_name, category=category)
+            dire_vc = await guild.create_voice_channel(name=dire_name, category=category)
         except discord.Forbidden:
-            return await interaction.followup.send("⚠️ У бота нет прав на создание голосовых каналов.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "no_vc_perms"), ephemeral=True)
         except discord.HTTPException as e:
             logger.error(f"Failed to create VCs for lobby {self.lobby_id}: {e}")
             if radiant_vc: await radiant_vc.delete()
             if dire_vc: await dire_vc.delete()
-            return await interaction.followup.send("❌ Ошибка API Discord при создании каналов.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "vc_api_error"), ephemeral=True)
 
         lobby.update({
             "shuffled": True,
@@ -102,7 +146,7 @@ class AdminLobbyView(discord.ui.View):
 
         move_tasks = []
         for team, vc in [(radiant, radiant_vc), (dire, dire_vc)]:
-            team_name = "Radiant" if vc == radiant_vc else "Dire"
+            team_name = "radiant" if vc == radiant_vc else "dire"
             for uid in team.values():
                 if is_dummy_player(uid):
                     continue
@@ -114,7 +158,10 @@ class AdminLobbyView(discord.ui.View):
                 if m.voice:
                     move_tasks.append(m.move_to(vc))
                 
-                embed_dm = WindrangerEmbed.dm_info(self.lobby_id, password, team_name, host, guild, radiant, dire, self.emojis)
+                user_loc_str = await self.bot.db.get_user_locale(uid)
+                u_loc = discord.Locale(user_loc_str) if user_loc_str else self.locale
+                
+                embed_dm = WindrangerEmbed.dm_info(self.bot.i18n, u_loc, self.lobby_id, password, team_name, host, guild, radiant, dire, self.emojis)
                 try:
                     await m.send(embed=embed_dm)
                 except discord.Forbidden:
@@ -123,8 +170,8 @@ class AdminLobbyView(discord.ui.View):
         if move_tasks:
             await asyncio.gather(*move_tasks, return_exceptions=True)
 
-        embed = WindrangerEmbed.post_shuffle(self.lobby_id, host, guild, radiant, dire, self.emojis)
-        main_view = LobbyView(self.bot, self.lobby_id, self.emojis)
+        embed = WindrangerEmbed.post_shuffle(self.bot.i18n, self.locale, self.lobby_id, host, guild, radiant, dire, self.emojis)
+        main_view = LobbyView(self.bot, self.lobby_id, self.emojis, self.locale)
         for child in main_view.children:
             child.disabled = True
             
@@ -144,7 +191,7 @@ class AdminLobbyView(discord.ui.View):
         for child in self.children:
             child.disabled = True
             
-        await interaction.followup.send("✅ Матч запущен! Пароли разосланы, команды отбалансированы по MMR, каналы созданы.", ephemeral=True)
+        await interaction.followup.send(await _t(self.bot, interaction, "match_started"), ephemeral=True)
 
     async def btn_cancel(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -185,7 +232,7 @@ class AdminLobbyView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.edit_original_response(view=self)
-        await interaction.followup.send("🗑️ Лобби отменено, каналы удалены.", ephemeral=True)
+        await interaction.followup.send(await _t(self.bot, interaction, "lobby_cancelled"), ephemeral=True)
 
     async def btn_win_radiant(self, interaction: discord.Interaction):
         await self.finish_match(interaction, "radiant")
@@ -199,7 +246,7 @@ class AdminLobbyView(discord.ui.View):
         lobby = await db.active_lobbies.find_one({"_id": self.lobby_id})
         
         if not lobby:
-            return await interaction.followup.send("❌ Лобби не найдено или уже завершено.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "lobby_not_found"), ephemeral=True)
             
         guild = self.message.guild
         radiant = lobby["radiant"]
@@ -295,7 +342,7 @@ class AdminLobbyView(discord.ui.View):
         await db.active_lobbies.delete_one({"_id": self.lobby_id})
         host = guild.get_member(int(lobby["host_id"]))
         
-        embed = WindrangerEmbed.match_result(self.lobby_id, host, guild, radiant, dire, winner, self.emojis)
+        embed = WindrangerEmbed.match_result(self.bot.i18n, self.locale, self.lobby_id, host, guild, radiant, dire, winner, self.emojis)
         history_channel_id = config.get("history_channel_id")
         history_channel = guild.get_channel(int(history_channel_id)) if history_channel_id else None
 
@@ -321,41 +368,44 @@ class AdminLobbyView(discord.ui.View):
         for child in self.children:
             child.disabled = True
             
+        winner_localized = self.bot.i18n.get_string(self.locale, "lobby", winner)
         await asyncio.gather(
             interaction.edit_original_response(view=self),
-            interaction.followup.send(f"✅ Матч завершен! Победили **{'Radiant' if winner == 'radiant' else 'Dire'}**.\nМатч записан в историю.", ephemeral=True)
+            interaction.followup.send(await _t(self.bot, interaction, "match_finished", winner=winner_localized), ephemeral=True)
         )
 
 class LobbyView(discord.ui.View):
-    def __init__(self, bot, lobby_id: str, emojis: dict):
+    def __init__(self, bot, lobby_id: str, emojis: dict, locale: discord.Locale):
         super().__init__(timeout=None)
         self.bot = bot
         self.lobby_id = lobby_id
         self.emojis = emojis
+        self.locale = locale
 
-    @discord.ui.button(label="Pos 1", style=discord.ButtonStyle.secondary, custom_id="pos1", row=0)
-    async def btn_pos1(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_join(interaction, "pos1")
+        positions = ["pos1", "pos2", "pos3", "pos4", "pos5"]
+        for pos in positions:
+            btn = discord.ui.Button(
+                label=self.bot.i18n.get_string(self.locale, "lobby", pos), 
+                style=discord.ButtonStyle.secondary, 
+                custom_id=pos, 
+                row=0
+            )
+            btn.callback = self.make_join_callback(pos)
+            self.add_item(btn)
 
-    @discord.ui.button(label="Pos 2", style=discord.ButtonStyle.secondary, custom_id="pos2", row=0)
-    async def btn_pos2(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_join(interaction, "pos2")
+        btn_leave = discord.ui.Button(
+            label=self.bot.i18n.get_string(self.locale, "lobby", "btn_leave"), 
+            style=discord.ButtonStyle.red, 
+            custom_id="btn_leave", 
+            row=1
+        )
+        btn_leave.callback = self.handle_leave
+        self.add_item(btn_leave)
 
-    @discord.ui.button(label="Pos 3", style=discord.ButtonStyle.secondary, custom_id="pos3", row=0)
-    async def btn_pos3(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_join(interaction, "pos3")
-
-    @discord.ui.button(label="Pos 4", style=discord.ButtonStyle.secondary, custom_id="pos4", row=0)
-    async def btn_pos4(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_join(interaction, "pos4")
-
-    @discord.ui.button(label="Pos 5", style=discord.ButtonStyle.secondary, custom_id="pos5", row=0)
-    async def btn_pos5(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_join(interaction, "pos5")
-
-    @discord.ui.button(label="Покинуть", style=discord.ButtonStyle.red, custom_id="btn_leave", row=1)
-    async def btn_leave(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_leave(interaction)
+    def make_join_callback(self, pos: str):
+        async def callback(interaction: discord.Interaction):
+            await self.handle_join(interaction, pos)
+        return callback
 
     async def handle_join(self, interaction: discord.Interaction, pos: str):
         await interaction.response.defer(ephemeral=True)
@@ -369,13 +419,15 @@ class LobbyView(discord.ui.View):
             if waiting_vc:
                 member = interaction.guild.get_member(interaction.user.id)
                 if not member or not member.voice or member.voice.channel.id != int(waiting_room_id):
-                    return await interaction.followup.send(f"❌ Сначала зайди в голосовой канал {waiting_vc.mention}!", ephemeral=True)
+                    msg = await _t(self.bot, interaction, "join_vc_first", vc_mention=waiting_vc.mention)
+                    return await interaction.followup.send(msg, ephemeral=True)
 
         user_data = await db.users.find_one({"_id": user_id, "guild_id": guild_id})
         if user_data and (ban_expires := user_data.get("ban_expires")):
             if ban_expires.replace(tzinfo=datetime.timezone.utc) > discord.utils.utcnow():
                 expire_time = discord.utils.format_dt(ban_expires.replace(tzinfo=datetime.timezone.utc), "F")
-                return await interaction.followup.send(f"❌ Вы забанены в матчмейкинге. Блокировка спадет: {expire_time}.", ephemeral=True)
+                msg = await _t(self.bot, interaction, "banned", expire_time=expire_time)
+                return await interaction.followup.send(msg, ephemeral=True)
         
         existing_lobby = await db.active_lobbies.find_one({
             "guild_id": guild_id,
@@ -385,11 +437,12 @@ class LobbyView(discord.ui.View):
 
         if existing_lobby:
             short_id = existing_lobby["_id"].split('_')[1] if "_" in existing_lobby["_id"] else existing_lobby["_id"]
-            return await interaction.followup.send(f"❌ Вы уже находитесь в лобби `#{short_id}`. Сначала покиньте его или завершите матч.", ephemeral=True)
+            msg = await _t(self.bot, interaction, "already_in_lobby", short_id=short_id)
+            return await interaction.followup.send(msg, ephemeral=True)
 
         lobby = await db.active_lobbies.find_one({"_id": self.lobby_id})
         if not lobby or lobby.get("shuffled"):
-            return await interaction.followup.send("❌ Лобби закрыто или уже запущено.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "lobby_closed"), ephemeral=True)
 
         slots = lobby["slots"]
         all_players = lobby.get("all_players", [])
@@ -401,7 +454,7 @@ class LobbyView(discord.ui.View):
                 players.remove(user_id)
 
         if len(slots[pos]) >= 2:
-            return await interaction.followup.send("❌ Эта позиция уже занята.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "pos_taken"), ephemeral=True)
 
         slots[pos].append(user_id)
         if user_id not in all_players:
@@ -410,7 +463,8 @@ class LobbyView(discord.ui.View):
         is_full = all(len(slots[p]) == 2 for p in ["pos1", "pos2", "pos3", "pos4", "pos5"])
         
         host = interaction.guild.get_member(int(lobby["host_id"]))
-        embed = WindrangerEmbed.pre_shuffle(self.lobby_id, host, interaction.guild, slots, self.emojis)
+        locale = await resolve_locale(self.bot, interaction)
+        embed = WindrangerEmbed.pre_shuffle(self.bot.i18n, locale, self.lobby_id, host, interaction.guild, slots, self.emojis)
 
         await db.active_lobbies.update_one(
             {"_id": self.lobby_id}, 
@@ -419,7 +473,8 @@ class LobbyView(discord.ui.View):
         await interaction.message.edit(embed=embed, view=self)
         
         if is_full:
-            await interaction.channel.send(f"🎉 Лобби 10/10 собрано! <@{lobby['host_id']}>, запусти матч через `⚙️ Управление лобби`.")
+            msg = await _t(self.bot, interaction, "lobby_full", host_id=lobby['host_id'])
+            await interaction.channel.send(msg)
 
     async def handle_leave(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -427,7 +482,7 @@ class LobbyView(discord.ui.View):
         lobby = await db.find_one({"_id": self.lobby_id})
 
         if not lobby or lobby.get("shuffled"):
-            return await interaction.followup.send("❌ Нельзя покинуть запущенное лобби.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "cannot_leave_started"), ephemeral=True)
 
         user_id = str(interaction.user.id)
         found = False
@@ -452,7 +507,8 @@ class LobbyView(discord.ui.View):
         )
         
         host = interaction.guild.get_member(int(lobby["host_id"]))
-        embed = WindrangerEmbed.pre_shuffle(self.lobby_id, host, interaction.guild, slots, self.emojis)
+        locale = await resolve_locale(self.bot, interaction)
+        embed = WindrangerEmbed.pre_shuffle(self.bot.i18n, locale, self.lobby_id, host, interaction.guild, slots, self.emojis)
         
         await interaction.message.edit(embed=embed, view=self)
 
@@ -462,7 +518,7 @@ class LobbyCog(commands.Cog):
         self.target_emojis = ['pos1', 'pos2', 'pos3', 'pos4', 'pos5', 'radi', 'dire', 'dota']
         
         self.ctx_menu = app_commands.ContextMenu(
-            name="Управление лобби",
+            name="Manage Lobby",
             callback=self.manage_lobby_ctx,
         )
         self.bot.tree.add_command(self.ctx_menu)
@@ -478,8 +534,16 @@ class LobbyCog(commands.Cog):
                 guild = self.bot.get_guild(int(lobby["guild_id"]))
                 if guild:
                     emojis = await self._update_guild_emojis(guild)
+                    config = await self.bot.db.get_guild_config(guild.id)
+                    guild_loc = config.get("locale")
+                    
+                    try:
+                        locale = discord.Locale(guild_loc) if guild_loc else self.bot.i18n.default_locale
+                    except ValueError:
+                        locale = self.bot.i18n.default_locale
+
                     self.bot.add_view(
-                        LobbyView(self.bot, lobby["_id"], emojis),
+                        LobbyView(self.bot, lobby["_id"], emojis, locale),
                         message_id=int(lobby["message_id"])
                     )
             logger.info("Persistent views restored successfully.")
@@ -498,19 +562,26 @@ class LobbyCog(commands.Cog):
             await self.bot.db.settings.update_one(
                 {"_id": str(guild.id)}, {"$set": {"emojis": found_emojis}}, upsert=True
             )
-            self.bot.db.clear_cache(guild.id)
+            self.bot.db.clear_guild_cache(guild.id)
         return found_emojis
 
     async def check_host_perms(self, interaction: discord.Interaction) -> bool:
-        if isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator:
+        user = interaction.user
+        if user.id == int(DEVELOPER_ID):
             return True
-        if interaction.user.id == interaction.guild.owner_id:
+        if isinstance(user, discord.Member) and user.guild_permissions.administrator:
+            return True
+        if interaction.guild and user.id == interaction.guild.owner_id:
             return True
             
         config = await self.bot.db.get_guild_config(interaction.guild.id)
-        if host_role_id := config.get("host_role_id"):
-            role = interaction.guild.get_role(int(host_role_id))
-            if role and role in interaction.user.roles:
+        if config:
+            gh_role_id = config.get("grand_host_role_id")
+            if gh_role_id and (gh_role := interaction.guild.get_role(int(gh_role_id))) and gh_role in user.roles:
+                return True
+                
+            h_role_id = config.get("host_role_id")
+            if h_role_id and (h_role := interaction.guild.get_role(int(h_role_id))) and h_role in user.roles:
                 return True
         return False
 
@@ -518,23 +589,21 @@ class LobbyCog(commands.Cog):
         lobby = await self.bot.db.active_lobbies.find_one({"message_id": str(message.id)})
         
         if not lobby:
-            return await interaction.response.send_message("❌ Это сообщение не является активным лобби.", ephemeral=True)
+            return await interaction.response.send_message(await _t(self.bot, interaction, "not_active_lobby"), ephemeral=True)
             
         is_host = await self.check_host_perms(interaction)
         if lobby.get("host_id") != str(interaction.user.id) and not is_host:
-            return await interaction.response.send_message("❌ У вас нет прав для управления этим лобби.", ephemeral=True)
+            return await interaction.response.send_message(await _t(self.bot, interaction, "no_perms_manage"), ephemeral=True)
             
         emojis = await self._update_guild_emojis(interaction.guild)
-        view = AdminLobbyView(self.bot, lobby, message, emojis)
+        locale = await resolve_locale(self.bot, interaction)
+        view = AdminLobbyView(self.bot, lobby, message, emojis, locale)
         
-        await interaction.response.send_message(
-            f"🔧 **Панель управления лобби ID:** `{lobby['_id']}`\nВыберите действие ниже:", 
-            view=view, 
-            ephemeral=True
-        )
+        msg = await _t(self.bot, interaction, "manage_panel", lobby_id=lobby['_id'])
+        await interaction.response.send_message(msg, view=view, ephemeral=True)
 
-    @app_commands.command(name="lobby", description="Создать новое лобби 5v5")
-    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.command(name="lobby", description="Create a new 5v5 lobby")
+    @is_privileged()
     async def create_lobby(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
@@ -543,7 +612,17 @@ class LobbyCog(commands.Cog):
         
         reg_channel_id = config.get("reg_channel_id")
         if not reg_channel_id:
-            return await interaction.followup.send("❌ Инфраструктура не настроена. Используйте `/setup`.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "no_infra"), ephemeral=True)
+
+        reg_channel = guild.get_channel(int(reg_channel_id))
+        if not reg_channel:
+            try:
+                reg_channel = await guild.fetch_channel(int(reg_channel_id))
+            except discord.NotFound:
+                pass
+                
+        if not reg_channel:
+            return await interaction.followup.send(await _t(self.bot, interaction, "reg_channel_not_found"), ephemeral=True)
 
         emojis = await self._update_guild_emojis(guild)
         lobby_seq = await self.bot.db.get_next_lobby_id(guild.id)
@@ -562,20 +641,17 @@ class LobbyCog(commands.Cog):
         }
         await self.bot.db.active_lobbies.insert_one(lobby_data)
         
-        view = LobbyView(self.bot, lobby_id, emojis)
-        embed = WindrangerEmbed.pre_shuffle(lobby_id, interaction.user, guild, lobby_data["slots"], emojis)
-
-        reg_channel = guild.get_channel(int(reg_channel_id))
-        if not reg_channel:
-            return await interaction.followup.send("❌ Канал регистрации не найден. Повторите `/setup`.", ephemeral=True)
+        locale = await resolve_locale(self.bot, interaction)
+        view = LobbyView(self.bot, lobby_id, emojis, locale)
+        embed = WindrangerEmbed.pre_shuffle(self.bot.i18n, locale, lobby_id, interaction.user, guild, lobby_data["slots"], emojis)
 
         msg = await reg_channel.send(embed=embed, view=view)
         await self.bot.db.active_lobbies.update_one({"_id": lobby_id}, {"$set": {"message_id": str(msg.id)}})
         
-        await interaction.followup.send(f"✅ Лобби создано в <#{reg_channel.id}>!", ephemeral=True)
+        await interaction.followup.send(await _t(self.bot, interaction, "lobby_created", channel_id=reg_channel.id), ephemeral=True)
 
-    @app_commands.command(name="fill", description="[ADMIN] Заполнить последнее лобби ботами")
-    @app_commands.default_permissions(administrator=True)
+    @app_commands.command(name="fill", description="[ADMIN] Fill the last lobby with bots")
+    @is_privileged()
     async def fill_lobby(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         db = self.bot.db.active_lobbies
@@ -583,7 +659,7 @@ class LobbyCog(commands.Cog):
         lobby = await db.find_one({"guild_id": str(interaction.guild.id), "shuffled": False}, sort=[("_id", -1)])
         
         if not lobby:
-            return await interaction.followup.send("❌ Нет открытых лобби для заполнения.", ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "no_open_lobbies"), ephemeral=True)
 
         dummy_ids = [str(100000000000000000 + i) for i in range(10)]
         slots = lobby["slots"]
@@ -604,23 +680,29 @@ class LobbyCog(commands.Cog):
         
         config = await self.bot.db.get_guild_config(interaction.guild.id)
         reg_channel = interaction.guild.get_channel(int(config["reg_channel_id"]))
-        
+        if not reg_channel:
+            try:
+                reg_channel = await interaction.guild.fetch_channel(int(config["reg_channel_id"]))
+            except discord.NotFound:
+                pass
+                
         try:
             msg = await reg_channel.fetch_message(int(lobby["message_id"]))
             host = interaction.guild.get_member(int(lobby["host_id"]))
             emojis = await self._update_guild_emojis(interaction.guild)
-            embed = WindrangerEmbed.pre_shuffle(lobby["_id"], host, interaction.guild, slots, emojis)
+            locale = await resolve_locale(self.bot, interaction)
+            embed = WindrangerEmbed.pre_shuffle(self.bot.i18n, locale, lobby["_id"], host, interaction.guild, slots, emojis)
             
-            view = LobbyView(self.bot, lobby["_id"], emojis)
+            view = LobbyView(self.bot, lobby["_id"], emojis, locale)
             await msg.edit(embed=embed, view=view)
             
-            await reg_channel.send(f"🎉 Лобби 10/10 собрано! <@{lobby['host_id']}>, запусти матч через `⚙️ Управление лобби`.")
-            await interaction.followup.send("✅ Лобби успешно заполнено.", ephemeral=True)
+            await reg_channel.send(await _t(self.bot, interaction, "lobby_full", host_id=lobby['host_id']))
+            await interaction.followup.send(await _t(self.bot, interaction, "lobby_filled"), ephemeral=True)
         except discord.NotFound:
             await db.delete_one({"_id": lobby["_id"]})
-            await interaction.followup.send("❌ Найдены устаревшие данные о лобби («призрак»). База очищена.", ephemeral=True)
+            await interaction.followup.send(await _t(self.bot, interaction, "ghost_lobby"), ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"⚠️ Ошибка обновления сообщения: {e}", ephemeral=True)
+            await interaction.followup.send(await _t(self.bot, interaction, "update_error", e=str(e)), ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(LobbyCog(bot))

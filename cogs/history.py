@@ -1,72 +1,56 @@
 from typing import Optional, List
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
-import logging
 
 from utils.embeds import WindrangerEmbed
 
 logger = logging.getLogger('windranger.history')
 
-class PaginationView(discord.ui.View):
-    def __init__(self, original_interaction: discord.Interaction, embeds: List[discord.Embed]):
-        super().__init__(timeout=180)
-        self.embeds = embeds
-        self.current_page = 0
-        self.original_interaction = original_interaction
-        self._update_buttons()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.original_interaction.user.id:
-            await interaction.response.send_message("❌ Это не ваша панель истории.", ephemeral=True)
-            return False
-        return True
-
-    def _update_buttons(self):
-        self.btn_prev.disabled = self.current_page == 0
-        self.btn_next.disabled = self.current_page == len(self.embeds) - 1
-        self.lbl_page.label = f"Стр. {self.current_page + 1}/{len(self.embeds)}"
-
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.primary, custom_id="prev")
-    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page -= 1
-        self._update_buttons()
-        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
-
-    @discord.ui.button(label="Стр. 1/1", style=discord.ButtonStyle.secondary, disabled=True, custom_id="lbl")
-    async def lbl_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        pass 
-
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.primary, custom_id="next")
-    async def btn_next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page += 1
-        self._update_buttons()
-        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        try:
-            await self.original_interaction.edit_original_response(view=self)
-        except discord.HTTPException:
-            pass
-
 class HistoryCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def _get_locale(self, interaction: discord.Interaction) -> discord.Locale:
+        u_loc = await self.bot.db.get_user_locale(interaction.user.id)
+        g_loc = None
+        if interaction.guild_id:
+            config = await self.bot.db.get_guild_config(interaction.guild_id)
+            g_loc = config.get("locale")
+            
+        res_str = (
+            u_loc or 
+            g_loc or 
+            (interaction.locale.value if interaction.locale else None) or 
+            (interaction.guild_locale.value if interaction.guild_locale else None)
+        )
+        try:
+            return discord.Locale(res_str) if res_str else self.bot.i18n.default_locale
+        except ValueError:
+            return self.bot.i18n.default_locale
 
     async def season_autocomplete(self, interaction: discord.Interaction, current: str) -> List[app_commands.Choice[int]]:
         config = await self.bot.db.get_guild_config(interaction.guild.id)
         current_season = config.get("current_season", 1)
         
+        locale = await self._get_locale(interaction)
         seasons = range(current_season, 0, -1)
-        return [app_commands.Choice(name=f"Сезон {s}", value=s) for s in seasons if current in str(s)][:25]
+        
+        choices = []
+        for s in seasons:
+            if current in str(s):
+                name = self.bot.i18n.get_string(locale, "history", "season_choice", season=s)
+                choices.append(app_commands.Choice(name=name, value=s))
+                
+        return choices[:25]
 
-    @app_commands.command(name="history", description="Показать историю последних матчей сервера")
-    @app_commands.describe(limit="Количество матчей (до 20)", season="Номер сезона (по умолчанию текущий)")
+    @app_commands.command(name="history", description="Show match history for the server")
+    @app_commands.describe(limit="Number of matches (max 10)", season="Season number (default: current)")
     @app_commands.autocomplete(season=season_autocomplete)
-    async def show_history(self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 20] = 5, season: Optional[int] = None):
-        await interaction.response.defer()
+    async def show_history(self, interaction: discord.Interaction, limit: app_commands.Range[int, 1, 10] = 5, season: Optional[int] = None):
+        await interaction.response.defer(ephemeral=True)
         
         guild_id = str(interaction.guild.id)
         config = await self.bot.db.get_guild_config(guild_id)
@@ -80,32 +64,30 @@ class HistoryCog(commands.Cog):
         matches = await cursor.to_list(length=limit)
 
         if not matches:
-            return await interaction.followup.send(f"❌ История матчей для Сезона {target_season} пуста.")
+            msg = self.bot.i18n.get_context_string(interaction, "history", "history_empty", season=target_season)
+            return await interaction.followup.send(msg)
 
         emojis = config.get("emojis", {})
+        locale = await self._get_locale(interaction)
 
         embeds = []
         for match in matches:
             host = interaction.guild.get_member(int(match["host_id"]))
             embed = WindrangerEmbed.match_result(
-                match["lobby_id"], host, interaction.guild, 
+                self.bot.i18n, locale, match["lobby_id"], host, interaction.guild, 
                 match["radiant"], match["dire"], match["winner"], emojis
             )
             short_id = match['lobby_id'].split('_')[1] if '_' in match['lobby_id'] else match['lobby_id']
-            embed.title = f"🕒 Сезон {target_season} | Клоз #{short_id}"
+            embed.title = self.bot.i18n.get_string(locale, "history", "history_title", season=target_season, short_id=short_id)
             embeds.append(embed)
 
-        if len(embeds) == 1:
-            await interaction.followup.send(embed=embeds[0])
-        else:
-            view = PaginationView(interaction, embeds)
-            await interaction.followup.send(embed=embeds[0], view=view)
+        await interaction.followup.send(embeds=embeds)
 
-    @app_commands.command(name="season_stats", description="Показать статистику игрока за конкретный сезон")
-    @app_commands.describe(season="Номер сезона", member="Игрок (оставьте пустым для своей статистики)")
+    @app_commands.command(name="season_stats", description="Show player statistics for a specific season")
+    @app_commands.describe(season="Season number", member="Player (leave empty for your own stats)")
     @app_commands.autocomplete(season=season_autocomplete)
     async def show_season_stats(self, interaction: discord.Interaction, season: int, member: Optional[discord.Member] = None):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         target = member or interaction.user
         guild_id = str(interaction.guild.id)
@@ -124,30 +106,31 @@ class HistoryCog(commands.Cog):
         p_data = await self.bot.db.users.find_one(query)
         
         if not p_data or p_data.get("matches", 0) == 0:
-            who = "У Вас" if target == interaction.user else f"У {target.display_name}"
-            return await interaction.followup.send(f"❌ {who} нет сыгранных матчей в Сезоне {season}.")
+            who_key = "you" if target == interaction.user else "target"
+            who_str = self.bot.i18n.get_context_string(interaction, "history", who_key, name=target.display_name)
+            msg = self.bot.i18n.get_context_string(interaction, "history", "season_stats_empty", who=who_str, season=season)
+            return await interaction.followup.send(msg)
 
         pts = p_data.get("mmr", 1000)
         
         rank_query = {
             "guild_id": guild_id,
             "mmr": {"$gt": pts},
-            "matches": {"$gt": 0}
+            "matches": {"$gt": 0},
+            "season": season
         }
-        
-        if not is_current:
-            rank_query["season"] = season
-        else:
-            rank_query["season"] = {"$exists": False} 
 
         players_above = await self.bot.db.users.count_documents(rank_query)
         rank_int = players_above + 1
 
         emojis = config.get("emojis", {})
+        locale = await self._get_locale(interaction)
 
-        embed = WindrangerEmbed.player_stats(target, p_data, rank_int, emojis)
-        embed.title = f"📊 Сезон {season} | Статистика: {target.display_name}"
-        embed.set_footer(text=f"Запросил: {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        embed = WindrangerEmbed.player_stats(self.bot.i18n, locale, target, p_data, rank_int, emojis)
+        embed.title = self.bot.i18n.get_string(locale, "history", "season_stats_title", season=season, name=target.display_name)
+        
+        req_str = self.bot.i18n.get_string(locale, "history", "requested_by", name=interaction.user.display_name)
+        embed.set_footer(text=req_str, icon_url=interaction.user.display_avatar.url)
         
         await interaction.followup.send(embed=embed)
 

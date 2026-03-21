@@ -1,0 +1,11 @@
+{
+  "err_wrong_channel": "❌ Эта команда доступна только в канале <#{channel_id}>.",
+  "lb_refreshed": "✅ Лидерборд успешно обновлен/восстановлен.",
+  "pts_updated": "✅ PTS игрока {name} в сезоне {season} установлен на {pts}.",
+  "no_matches": "У {who} нет сыгранных матчей в сезоне {season}.",
+  "no_matches_season": "В сезоне {season} еще нет сыгранных матчей.",
+  "embed_title": "Статистика | Сезон {season}",
+  "requested_by": "Запросил: {name}",
+  "you": "вас",
+  "target": "игрока {name}"
+}

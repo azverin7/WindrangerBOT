@@ -17,7 +17,7 @@ def balance_teams_by_mmr(slots: Dict[str, List[str]], user_mmrs: Dict[str, int])
         for i, pos in enumerate(positions):
             players = slots.get(pos, [])
             if len(players) != 2:
-                raise ValueError(f"CRITICAL: Слот {pos} не заполнен полностью.")
+                raise ValueError(f"CRITICAL: Slot {pos} is not fully populated (found {len(players)} players).")
 
             rad_idx = combination[i]
             dir_idx = 1 - rad_idx
@@ -28,8 +28,8 @@ def balance_teams_by_mmr(slots: Dict[str, List[str]], user_mmrs: Dict[str, int])
             current_radiant[pos] = rad_uid
             current_dire[pos] = dir_uid
 
-            radiant_mmr += user_mmrs[rad_uid]
-            dire_mmr += user_mmrs[dir_uid]
+            radiant_mmr += user_mmrs.get(rad_uid, 1000)
+            dire_mmr += user_mmrs.get(dir_uid, 1000)
 
         diff = abs(radiant_mmr - dire_mmr)
         

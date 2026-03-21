@@ -8,6 +8,7 @@ from discord.ext import commands
 from discord import app_commands
 
 from database.mongo import Database
+from core.i18n import I18nEngine, DiscordCommandTranslator
 
 logger = logging.getLogger('windranger.bot')
 
@@ -22,12 +23,15 @@ class WindrangerBot(commands.Bot):
         intents.voice_states = True
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.db = Database()
+        self.i18n = I18nEngine(Path(__file__).parent.parent / "locales")
         self.disabled_cogs: List[str] = []
 
     async def setup_hook(self) -> None:
         if not await self.db.connect_and_init():
             logger.critical("Database initialization failed. Shutting down.")
             sys.exit(1)
+
+        await self.tree.set_translator(DiscordCommandTranslator(self.i18n))
 
         cogs_dir = Path(__file__).parent.parent / "cogs"
         
@@ -58,11 +62,11 @@ class WindrangerBot(commands.Bot):
             return
 
         if isinstance(error, app_commands.MissingPermissions):
-            msg = "⚠️ У вас недостаточно прав для использования этой команды."
+            msg = self.i18n.get_context_string(interaction, "errors", "missing_permissions")
         elif isinstance(error, app_commands.BotMissingPermissions):
-            msg = "⚠️ У бота нет необходимых прав для выполнения этой команды."
+            msg = self.i18n.get_context_string(interaction, "errors", "bot_missing_permissions")
         else:
-            msg = "❌ Произошла внутренняя системная ошибка."
+            msg = self.i18n.get_context_string(interaction, "errors", "internal_error")
             cmd_name = interaction.command.name if interaction.command else 'Unknown'
             logger.error(f"Command error in {cmd_name}: {error}", exc_info=True)
 

@@ -15,21 +15,31 @@ bot = WindrangerBot()
 
 @bot.command()
 @commands.is_owner()
-async def sync(ctx):
-    await ctx.message.delete()
+async def sync(ctx: commands.Context) -> None:
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException as e:
+        logger.warning(f"Failed to delete sync command message: {e}")
+
     try:
         synced = await bot.tree.sync()
         logger.info(f"Synced {len(synced)} app commands.")
         msg = await ctx.send(f"✅ Synced {len(synced)} commands.")
-        await msg.delete(delay=5)
+        
+        try:
+            await msg.delete(delay=5.0)
+        except discord.HTTPException:
+            pass
     except Exception as e:
         logger.error(f"Failed to sync commands: {e}", exc_info=True)
-        msg = await ctx.send(f"❌ Sync error: {e}")
-        await msg.delete(delay=5)
+        try:
+            msg = await ctx.send(f"❌ Sync error: {e}")
+            await msg.delete(delay=5.0)
+        except discord.HTTPException:
+            pass
 
-async def main():
+async def main() -> None:
     setup_logging()
-    
     async with bot:
         await bot.start(DISCORD_TOKEN)
 

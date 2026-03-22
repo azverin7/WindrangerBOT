@@ -13,8 +13,9 @@ if not DISCORD_TOKEN or not MONGO_URL:
 
 try:
     DEVELOPER_ID: Final[int] = int(os.getenv("DEVELOPER_ID", "0"))
+    DEFAULT_MMR: Final[int] = int(os.getenv("DEFAULT_MMR", "1000"))
 except ValueError:
-    raise ValueError("CRITICAL ERROR: DEVELOPER_ID must be int")
+    raise ValueError("CRITICAL ERROR: DEVELOPER_ID and DEFAULT_MMR must be int")
 
 ROLE_MAP: Final[Dict[str, str]] = {
     "1": "Carry",

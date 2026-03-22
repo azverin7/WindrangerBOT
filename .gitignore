@@ -4,3 +4,12 @@ __pycache__/
 bot.log
 venv/
 .DS_Store
+cat <<EOT >> .gitignore
+
+# Backups and Dumps
+backups/
+*.archive.gz
+*.log
+project_dump.txt
+make_dump.py
+backup_discord.sh

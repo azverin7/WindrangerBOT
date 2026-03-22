@@ -2,14 +2,14 @@ import asyncio
 import datetime
 import logging
 import secrets
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List, Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 from pymongo import UpdateOne
 
-from core.config import DEVELOPER_ID
+from core.config import DEVELOPER_ID, DEFAULT_MMR
 from utils.embeds import WindrangerEmbed
 from utils.matchmaking import balance_teams_by_mmr
 from utils.checks import is_privileged
@@ -43,6 +43,13 @@ async def resolve_locale(bot, interaction: discord.Interaction) -> discord.Local
 async def _t(bot, interaction: discord.Interaction, key: str, **kwargs) -> str:
     u_loc, g_loc = await get_locales(bot, interaction.guild_id, interaction.user.id)
     return bot.i18n.get_context_string(interaction, "lobby", key, db_user_locale=u_loc, db_guild_locale=g_loc, **kwargs)
+
+async def safe_gather_tasks(tasks: List[Any], chunk_size: int = 3, delay: float = 0.6) -> None:
+    for i in range(0, len(tasks), chunk_size):
+        chunk = tasks[i:i + chunk_size]
+        await asyncio.gather(*chunk, return_exceptions=True)
+        if i + chunk_size < len(tasks):
+            await asyncio.sleep(delay)
 
 class AdminLobbyView(discord.ui.View):
     def __init__(self, bot, lobby: dict, message: discord.Message, emojis: dict, locale: discord.Locale):
@@ -90,9 +97,9 @@ class AdminLobbyView(discord.ui.View):
     async def btn_start(self, interaction: discord.Interaction):
         await interaction.response.defer()
         db = self.bot.db.active_lobbies
+        
         lobby = await db.find_one({"_id": self.lobby_id})
-
-        if lobby.get("shuffled"):
+        if not lobby or lobby.get("shuffled"):
             return await interaction.followup.send(await _t(self.bot, interaction, "already_started"), ephemeral=True)
 
         slots = lobby["slots"]
@@ -104,27 +111,51 @@ class AdminLobbyView(discord.ui.View):
             all_uids = [uid for players in slots.values() for uid in players]
 
         users_cursor = self.bot.db.users.find({"_id": {"$in": all_uids}, "guild_id": str(interaction.guild.id)})
-        
-        user_mmrs = {uid: 1000 for uid in all_uids}
+        user_mmrs = {uid: DEFAULT_MMR for uid in all_uids}
         async for udoc in users_cursor:
-            user_mmrs[udoc["_id"]] = udoc.get("mmr", 1000)
+            user_mmrs[udoc["_id"]] = udoc.get("mmr", DEFAULT_MMR)
 
         radiant, dire = balance_teams_by_mmr(slots, user_mmrs)
         password = str(secrets.randbelow(9000) + 1000)
         
         guild = interaction.guild
         category = self.message.channel.category
-        short_id = self.lobby_id.split('_')[1] if '_' in self.lobby_id else self.lobby_id
+        short_id = self.lobby_id.split('_')[-1] if '_' in self.lobby_id else self.lobby_id
         host = guild.get_member(int(lobby["host_id"]))
 
-        radiant_vc = None
-        dire_vc = None
+        config = await self.bot.db.get_guild_config(guild.id)
+        
+        base_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(connect=False),
+            guild.me: discord.PermissionOverwrite(connect=True, manage_channels=True)
+        }
+        
+        if gh_role_id := config.get("grand_host_role_id"):
+            if gh_role := guild.get_role(int(gh_role_id)):
+                base_overwrites[gh_role] = discord.PermissionOverwrite(connect=True)
+                
+        if h_role_id := config.get("host_role_id"):
+            if h_role := guild.get_role(int(h_role_id)):
+                base_overwrites[h_role] = discord.PermissionOverwrite(connect=True)
+
+        rad_overwrites = base_overwrites.copy()
+        dire_overwrites = base_overwrites.copy()
+
+        for uid in radiant.values():
+            if not is_dummy_player(uid) and (mem := guild.get_member(int(uid))):
+                rad_overwrites[mem] = discord.PermissionOverwrite(connect=True)
+
+        for uid in dire.values():
+            if not is_dummy_player(uid) and (mem := guild.get_member(int(uid))):
+                dire_overwrites[mem] = discord.PermissionOverwrite(connect=True)
+
+        radiant_vc, dire_vc = None, None
 
         try:
             radiant_name = self.bot.i18n.get_string(self.locale, "lobby", "vc_radiant", short_id=short_id)
             dire_name = self.bot.i18n.get_string(self.locale, "lobby", "vc_dire", short_id=short_id)
-            radiant_vc = await guild.create_voice_channel(name=radiant_name, category=category)
-            dire_vc = await guild.create_voice_channel(name=dire_name, category=category)
+            radiant_vc = await guild.create_voice_channel(name=radiant_name, category=category, overwrites=rad_overwrites)
+            dire_vc = await guild.create_voice_channel(name=dire_name, category=category, overwrites=dire_overwrites)
         except discord.Forbidden:
             return await interaction.followup.send(await _t(self.bot, interaction, "no_vc_perms"), ephemeral=True)
         except discord.HTTPException as e:
@@ -133,16 +164,23 @@ class AdminLobbyView(discord.ui.View):
             if dire_vc: await dire_vc.delete()
             return await interaction.followup.send(await _t(self.bot, interaction, "vc_api_error"), ephemeral=True)
 
-        lobby.update({
-            "shuffled": True,
-            "radiant": radiant,
-            "dire": dire,
-            "password": password,
-            "radiant_vc": radiant_vc.id,
-            "dire_vc": dire_vc.id
-        })
+        res = await db.update_one(
+            {"_id": self.lobby_id, "shuffled": False},
+            {"$set": {
+                "shuffled": True,
+                "radiant": radiant,
+                "dire": dire,
+                "password": password,
+                "radiant_vc": radiant_vc.id,
+                "dire_vc": dire_vc.id,
+                "version": lobby.get("version", 1) + 1
+            }}
+        )
 
-        await db.update_one({"_id": self.lobby_id}, {"$set": lobby})
+        if res.modified_count == 0:
+            if radiant_vc: await radiant_vc.delete()
+            if dire_vc: await dire_vc.delete()
+            return await interaction.followup.send(await _t(self.bot, interaction, "already_started"), ephemeral=True)
 
         move_tasks = []
         for team, vc in [(radiant, radiant_vc), (dire, dire_vc)]:
@@ -150,25 +188,22 @@ class AdminLobbyView(discord.ui.View):
             for uid in team.values():
                 if is_dummy_player(uid):
                     continue
-                    
                 m = guild.get_member(int(uid))
                 if not m:
                     continue
-                    
                 if m.voice:
                     move_tasks.append(m.move_to(vc))
                 
                 user_loc_str = await self.bot.db.get_user_locale(uid)
                 u_loc = discord.Locale(user_loc_str) if user_loc_str else self.locale
-                
                 embed_dm = WindrangerEmbed.dm_info(self.bot.i18n, u_loc, self.lobby_id, password, team_name, host, guild, radiant, dire, self.emojis)
                 try:
                     await m.send(embed=embed_dm)
                 except discord.Forbidden:
-                    logger.info(f"Could not send DM to {m.display_name} (DMs disabled).")
+                    logger.info(f"Could not send DM to {m.display_name}.")
 
         if move_tasks:
-            await asyncio.gather(*move_tasks, return_exceptions=True)
+            await safe_gather_tasks(move_tasks, chunk_size=3, delay=0.5)
 
         embed = WindrangerEmbed.post_shuffle(self.bot.i18n, self.locale, self.lobby_id, host, guild, radiant, dire, self.emojis)
         main_view = LobbyView(self.bot, self.lobby_id, self.emojis, self.locale)
@@ -182,15 +217,14 @@ class AdminLobbyView(discord.ui.View):
                     await history_msg.delete()
         except discord.HTTPException:
             pass
-            
+           
+        for child in self.children:
+            child.disabled = True
+
         await asyncio.gather(
             self.message.edit(embed=embed, view=main_view),
             interaction.edit_original_response(view=self)
         )
-        
-        for child in self.children:
-            child.disabled = True
-            
         await interaction.followup.send(await _t(self.bot, interaction, "match_started"), ephemeral=True)
 
     async def btn_cancel(self, interaction: discord.Interaction):
@@ -216,7 +250,7 @@ class AdminLobbyView(discord.ui.View):
                         delete_tasks.append(vc.delete())
 
             if move_tasks:
-                await asyncio.gather(*move_tasks, return_exceptions=True)
+                await safe_gather_tasks(move_tasks, chunk_size=4, delay=0.5)
             if delete_tasks:
                 await asyncio.gather(*delete_tasks, return_exceptions=True)
 
@@ -231,6 +265,7 @@ class AdminLobbyView(discord.ui.View):
             
         for child in self.children:
             child.disabled = True
+    
         await interaction.edit_original_response(view=self)
         await interaction.followup.send(await _t(self.bot, interaction, "lobby_cancelled"), ephemeral=True)
 
@@ -243,14 +278,14 @@ class AdminLobbyView(discord.ui.View):
     async def finish_match(self, interaction: discord.Interaction, winner: str):
         await interaction.response.defer()
         db = self.bot.db
-        lobby = await db.active_lobbies.find_one({"_id": self.lobby_id})
         
+        lobby = await db.active_lobbies.find_one_and_delete({"_id": self.lobby_id})
         if not lobby:
             return await interaction.followup.send(await _t(self.bot, interaction, "lobby_not_found"), ephemeral=True)
             
         guild = self.message.guild
-        radiant = lobby["radiant"]
-        dire = lobby["dire"]
+        radiant = lobby.get("radiant", {})
+        dire = lobby.get("dire", {})
         
         config = await db.get_guild_config(guild.id)
         current_season = config.get("current_season", 1)
@@ -272,10 +307,8 @@ class AdminLobbyView(discord.ui.View):
             is_winner = p_data["is_winner"]
             
             user = existing_users.get(uid, {})
-            
-            mmr_change = 25 if is_winner else -25
-            current_mmr = user.get("mmr", 1000)
-            new_mmr = current_mmr + mmr_change
+            current_mmr = user.get("mmr", DEFAULT_MMR)
+            new_mmr = current_mmr + 25 if is_winner else current_mmr - 25
             
             win_inc = 1 if is_winner else 0
             loss_inc = 0 if is_winner else 1
@@ -335,14 +368,13 @@ class AdminLobbyView(discord.ui.View):
                     delete_tasks.append(vc.delete())
 
         if move_tasks:
-            await asyncio.gather(*move_tasks, return_exceptions=True)
+            await safe_gather_tasks(move_tasks, chunk_size=4, delay=0.5)
         if delete_tasks:
             await asyncio.gather(*delete_tasks, return_exceptions=True)
-                
-        await db.active_lobbies.delete_one({"_id": self.lobby_id})
-        host = guild.get_member(int(lobby["host_id"]))
         
+        host = guild.get_member(int(lobby["host_id"]))
         embed = WindrangerEmbed.match_result(self.bot.i18n, self.locale, self.lobby_id, host, guild, radiant, dire, winner, self.emojis)
+        
         history_channel_id = config.get("history_channel_id")
         history_channel = guild.get_channel(int(history_channel_id)) if history_channel_id else None
 
@@ -407,6 +439,57 @@ class LobbyView(discord.ui.View):
             await self.handle_join(interaction, pos)
         return callback
 
+    async def _update_lobby_state_occ(self, interaction: discord.Interaction, user_id: str, pos: str, action: str) -> Optional[dict]:
+        db = self.bot.db.active_lobbies
+        max_retries = 3
+        
+        for _ in range(max_retries):
+            lobby = await db.find_one({"_id": self.lobby_id})
+            if not lobby or lobby.get("shuffled"):
+                return None
+                
+            slots = lobby["slots"]
+            all_players = lobby.get("all_players", [])
+            current_version = lobby.get("version", 1)
+            
+            if action == "join":
+                for p, players in slots.items():
+                    if user_id in players:
+                        if p == pos:
+                            return lobby 
+                        players.remove(user_id)
+                
+                if len(slots[pos]) >= 2:
+                    return {"error": "pos_taken"}
+                    
+                slots[pos].append(user_id)
+                if user_id not in all_players:
+                    all_players.append(user_id)
+                    
+            elif action == "leave":
+                found = False
+                for players in slots.values():
+                    if user_id in players:
+                        players.remove(user_id)
+                        found = True
+                        break
+                if not found:
+                    return lobby
+                if user_id in all_players:
+                    all_players.remove(user_id)
+
+            res = await db.update_one(
+                {"_id": self.lobby_id, "version": current_version},
+                {"$set": {"slots": slots, "all_players": all_players, "version": current_version + 1}}
+            )
+            
+            if res.modified_count > 0:
+                lobby["slots"] = slots
+                lobby["all_players"] = all_players
+                return lobby
+                
+        return {"error": "concurrency_failed"}
+
     async def handle_join(self, interaction: discord.Interaction, pos: str):
         await interaction.response.defer(ephemeral=True)
         user_id = str(interaction.user.id)
@@ -436,81 +519,48 @@ class LobbyView(discord.ui.View):
         })
 
         if existing_lobby:
-            short_id = existing_lobby["_id"].split('_')[1] if "_" in existing_lobby["_id"] else existing_lobby["_id"]
+            short_id = existing_lobby["_id"].split('_')[-1] if "_" in existing_lobby["_id"] else existing_lobby["_id"]
             msg = await _t(self.bot, interaction, "already_in_lobby", short_id=short_id)
             return await interaction.followup.send(msg, ephemeral=True)
 
-        lobby = await db.active_lobbies.find_one({"_id": self.lobby_id})
-        if not lobby or lobby.get("shuffled"):
+        lobby_data = await self._update_lobby_state_occ(interaction, user_id, pos, "join")
+        
+        if not lobby_data:
             return await interaction.followup.send(await _t(self.bot, interaction, "lobby_closed"), ephemeral=True)
+        if "error" in lobby_data:
+            if lobby_data["error"] == "pos_taken":
+                return await interaction.followup.send(await _t(self.bot, interaction, "pos_taken"), ephemeral=True)
+            return await interaction.followup.send(await _t(self.bot, interaction, "update_error", e="Concurrent modification"), ephemeral=True)
 
-        slots = lobby["slots"]
-        all_players = lobby.get("all_players", [])
-
-        for p, players in slots.items():
-            if user_id in players:
-                if p == pos:
-                    return
-                players.remove(user_id)
-
-        if len(slots[pos]) >= 2:
-            return await interaction.followup.send(await _t(self.bot, interaction, "pos_taken"), ephemeral=True)
-
-        slots[pos].append(user_id)
-        if user_id not in all_players:
-            all_players.append(user_id)
-            
+        slots = lobby_data["slots"]
         is_full = all(len(slots[p]) == 2 for p in ["pos1", "pos2", "pos3", "pos4", "pos5"])
         
-        host = interaction.guild.get_member(int(lobby["host_id"]))
+        host = interaction.guild.get_member(int(lobby_data["host_id"]))
         locale = await resolve_locale(self.bot, interaction)
         embed = WindrangerEmbed.pre_shuffle(self.bot.i18n, locale, self.lobby_id, host, interaction.guild, slots, self.emojis)
 
-        await db.active_lobbies.update_one(
-            {"_id": self.lobby_id}, 
-            {"$set": {"slots": slots, "all_players": all_players}}
-        )
         await interaction.message.edit(embed=embed, view=self)
         
         if is_full:
-            msg = await _t(self.bot, interaction, "lobby_full", host_id=lobby['host_id'])
+            msg = await _t(self.bot, interaction, "lobby_full", host_id=lobby_data['host_id'])
             await interaction.channel.send(msg)
 
     async def handle_leave(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        db = self.bot.db.active_lobbies
-        lobby = await db.find_one({"_id": self.lobby_id})
-
-        if not lobby or lobby.get("shuffled"):
-            return await interaction.followup.send(await _t(self.bot, interaction, "cannot_leave_started"), ephemeral=True)
-
-        user_id = str(interaction.user.id)
-        found = False
-        slots = lobby["slots"]
-        all_players = lobby.get("all_players", [])
-
-        for players in slots.values():
-            if user_id in players:
-                players.remove(user_id)
-                found = True
-                break
-
-        if not found:
-            return
-
-        if user_id in all_players:
-            all_players.remove(user_id)
-
-        await db.update_one(
-            {"_id": self.lobby_id}, 
-            {"$set": {"slots": slots, "all_players": all_players}}
-        )
         
-        host = interaction.guild.get_member(int(lobby["host_id"]))
+        lobby_data = await self._update_lobby_state_occ(interaction, str(interaction.user.id), "", "leave")
+        
+        if not lobby_data:
+            return await interaction.followup.send(await _t(self.bot, interaction, "cannot_leave_started"), ephemeral=True)
+        if "error" in lobby_data:
+            return await interaction.followup.send(await _t(self.bot, interaction, "update_error", e="Concurrent modification"), ephemeral=True)
+
+        host = interaction.guild.get_member(int(lobby_data["host_id"]))
         locale = await resolve_locale(self.bot, interaction)
-        embed = WindrangerEmbed.pre_shuffle(self.bot.i18n, locale, self.lobby_id, host, interaction.guild, slots, self.emojis)
+        embed = WindrangerEmbed.pre_shuffle(self.bot.i18n, locale, self.lobby_id, host, interaction.guild, lobby_data["slots"], self.emojis)
         
         await interaction.message.edit(embed=embed, view=self)
+
 
 class LobbyCog(commands.Cog):
     def __init__(self, bot):
@@ -626,7 +676,7 @@ class LobbyCog(commands.Cog):
 
         emojis = await self._update_guild_emojis(guild)
         lobby_seq = await self.bot.db.get_next_lobby_id(guild.id)
-        lobby_id = f"lobby_{lobby_seq}"
+        lobby_id = f"lobby_{guild.id}_{lobby_seq}"
 
         lobby_data = {
             "_id": lobby_id,
@@ -634,6 +684,7 @@ class LobbyCog(commands.Cog):
             "host_id": str(interaction.user.id), 
             "message_id": None,                  
             "shuffled": False,
+            "version": 1,
             "all_players": [],
             "slots": {"pos1": [], "pos2": [], "pos3": [], "pos4": [], "pos5": []},
             "radiant": {},
@@ -675,7 +726,7 @@ class LobbyCog(commands.Cog):
 
         await db.update_one(
             {"_id": lobby["_id"]}, 
-            {"$set": {"slots": slots, "all_players": all_players}}
+            {"$set": {"slots": slots, "all_players": all_players, "version": lobby.get("version", 1) + 1}}
         )
         
         config = await self.bot.db.get_guild_config(interaction.guild.id)

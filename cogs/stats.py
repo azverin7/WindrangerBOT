@@ -7,6 +7,7 @@ from discord.ext import commands
 
 from utils.embeds import WindrangerEmbed
 from utils.checks import is_privileged
+from core.config import DEFAULT_MMR
 
 logger = logging.getLogger('windranger.stats')
 
@@ -66,6 +67,7 @@ class StatsCog(commands.Cog):
             try:
                 partial_msg = channel.get_partial_message(int(msg_id))
                 await partial_msg.edit(embed=embed)
+                return
             except discord.HTTPException as e:
                 logger.error(f"Failed to edit leaderboard message in {guild.id}: {e}")
                 msg_id = None 
@@ -107,7 +109,7 @@ class StatsCog(commands.Cog):
             msg = self.bot.i18n.get_context_string(interaction, "stats", "no_matches", who=who_str, season=current_season)
             return await interaction.followup.send(msg)
 
-        pts = p_data["mmr"]
+        pts = p_data.get("mmr", DEFAULT_MMR)
         players_above = await self.bot.db.users.count_documents({
             "guild_id": guild_id,
             "season": current_season,
@@ -123,6 +125,29 @@ class StatsCog(commands.Cog):
         
         title_str = self.bot.i18n.get_context_string(interaction, "stats", "embed_title", season=current_season, name=target.display_name)
         embed.title = title_str
+        
+        req_str = self.bot.i18n.get_context_string(interaction, "stats", "requested_by", name=interaction.user.display_name)
+        embed.set_footer(text=req_str, icon_url=interaction.user.display_avatar.url)
+        
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="top_season", description="Show top 10 players for a specific season")
+    @app_commands.describe(season="Season number")
+    async def top_season(self, interaction: discord.Interaction, season: int):
+        guild_id = str(interaction.guild.id)
+        config = await self.bot.db.get_guild_config(guild_id)
+        
+        stats_ch_id = config.get("stats_channel_id")
+        if stats_ch_id and interaction.channel_id != int(stats_ch_id):
+            msg = self.bot.i18n.get_context_string(interaction, "stats", "err_wrong_channel", channel_id=stats_ch_id)
+            return await interaction.response.send_message(msg, ephemeral=True)
+
+        await interaction.response.defer()
+        
+        tops = await self._get_top_players(guild_id, season)
+        locale = await self._get_locale(interaction)
+        
+        embed = WindrangerEmbed.leaderboard(self.bot.i18n, locale, interaction.guild, tops, season)
         
         req_str = self.bot.i18n.get_context_string(interaction, "stats", "requested_by", name=interaction.user.display_name)
         embed.set_footer(text=req_str, icon_url=interaction.user.display_avatar.url)

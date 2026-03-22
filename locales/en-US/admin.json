@@ -1,4 +1,20 @@
 {
+  "cmd_setup_desc": "[ADMIN] Delete old infrastructure and create a new one",
+  "cmd_add_host_desc": "[GRAND HOST] Assign Host role to a player",
+  "cmd_remove_host_desc": "[GRAND HOST] Remove Host role from a player",
+  "cmd_punish_desc": "[HOST] Punish a player (ban from matchmaking & deduct PTS)",
+  "cmd_punish_arg_member": "Target player",
+  "cmd_punish_arg_hours": "Ban duration in hours",
+  "cmd_punish_arg_reason": "Reason for punishment",
+  "cmd_punish_arg_penalty": "PTS to deduct (default: 0)",
+  "cmd_clear_desc": "[HOST] Clear messages in the current channel",
+  "cmd_clear_arg_amount": "Number of messages to delete (1-100)",
+  "cmd_cleanup_desc": "[ADMIN] Delete all bot channels and categories",
+  "cmd_hard_reset_desc": "[OWNER] FULL DATABASE WIPE. Deletes stats, lobbies, history.",
+  "cmd_hard_reset_arg_confirm": "Type CONFIRM in uppercase to proceed",
+  "cmd_unban_desc": "[HOST] Remove matchmaking ban from a player",
+  "cmd_end_season_desc": "[ADMIN] End the current season and archive stats",
+  "cmd_end_season_arg_confirm": "Type CONFIRM in uppercase to proceed",
   "host_added": "✅ Player {mention} has been promoted to Host.",
   "host_removed": "✅ Player {mention} has been demoted from Host.",
   "err_no_host_role": "❌ Host role is not configured in the database. Run /setup.",
@@ -29,5 +45,6 @@
   "banlist_empty": "The ban list is empty. Everyone is a good boy!",
   "banlist_entry": "👤 <@{uid}> — until {time}\n└ Penalty: **{penalty} PTS** | Reason: *{reason}*\n\n",
   "reg_rules_title": "📜 Rules & Registration",
-  "reg_rules_desc": "Welcome to the matchmaking system!\n\n**CRITICAL:** YOU MUST ALLOW DIRECT MESSAGES (DMs) FROM THE BOT ON THIS SERVER. Otherwise, you physically will not receive the lobby password!\n\n**Main commands:**\n`/lobby` — create or manage a lobby\n`/history` — view match history\n`/stats` — your statistics\n\nBe respectful. Griefing, leaving, or toxicity will result in an immediate Tribunal ban and PTS penalty."
+  "reg_rules_desc": "Welcome to the matchmaking system!\n\n**CRITICAL:** YOU MUST ALLOW DIRECT MESSAGES (DMs) FROM THE BOT ON THIS SERVER. Otherwise, you physically will not receive the lobby password!\n\n**Main commands:**\n`/lobby` — create or manage a lobby\n`/history` — view match history\n`/stats` — your statistics\n\nBe respectful. Griefing, leaving, or toxicity will result in an immediate Tribunal ban and PTS penalty.",
+  "season_ended": "Season {season} has been successfully ended! Welcome to Season {next_season}."
 }

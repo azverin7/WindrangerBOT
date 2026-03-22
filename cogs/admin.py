@@ -1,16 +1,18 @@
 import logging
 import datetime
+import asyncio
 from typing import Optional
 
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
+from pymongo import InsertOne, UpdateOne
 
-from core.config import DEVELOPER_ID
+from core.config import DEVELOPER_ID, DEFAULT_MMR
 
 logger = logging.getLogger('windranger.admin')
 
-def is_admin_or_dev():
+def _base_role_check(role_keys: tuple[str, ...]):
     async def predicate(interaction: discord.Interaction) -> bool:
         user = interaction.user
         if user.id == int(DEVELOPER_ID):
@@ -27,42 +29,22 @@ def is_admin_or_dev():
             return True
             
         settings = await interaction.client.db.get_guild_config(guild.id)
-        if settings:
-            gh_role_id = settings.get("grand_host_role_id")
-            if gh_role_id and (gh_role := guild.get_role(int(gh_role_id))) and gh_role in user.roles:
-                return True
-                
-            h_role_id = settings.get("host_role_id")
-            if h_role_id and (h_role := guild.get_role(int(h_role_id))) and h_role in user.roles:
+        if not settings:
+            return False
+            
+        for key in role_keys:
+            role_id = settings.get(key)
+            if role_id and (role := guild.get_role(int(role_id))) and role in user.roles:
                 return True
                 
         return False
     return app_commands.check(predicate)
 
+def is_admin_or_dev():
+    return _base_role_check(("grand_host_role_id", "host_role_id"))
+
 def is_grand_host_or_admin():
-    async def predicate(interaction: discord.Interaction) -> bool:
-        user = interaction.user
-        if user.id == int(DEVELOPER_ID):
-            return True
-            
-        guild = interaction.guild
-        if not guild:
-            return False
-            
-        if user.id == guild.owner_id:
-            return True
-            
-        if isinstance(user, discord.Member) and user.guild_permissions.administrator:
-            return True
-            
-        settings = await interaction.client.db.get_guild_config(guild.id)
-        if settings and (gh_role_id := settings.get("grand_host_role_id")):
-            role = guild.get_role(int(gh_role_id))
-            if role and role in user.roles:
-                return True
-                
-        return False
-    return app_commands.check(predicate)
+    return _base_role_check(("grand_host_role_id",))
 
 def is_owner_or_dev():
     async def predicate(interaction: discord.Interaction) -> bool:
@@ -134,8 +116,9 @@ class AdminCog(commands.Cog):
                 {"$unset": {"ban_expires": "", "ban_reason": "", "ban_penalty": ""}}
             )
 
-        for guild in affected_guilds:
-            await self.update_ban_list(guild)
+        update_tasks = [self.update_ban_list(guild) for guild in affected_guilds]
+        if update_tasks:
+            await asyncio.gather(*update_tasks, return_exceptions=True)
 
     @ban_expiration_worker.before_loop
     async def before_ban_expiration_worker(self):
@@ -266,7 +249,7 @@ class AdminCog(commands.Cog):
                 msg = self.bot.i18n.get_context_string(interaction, "admin", "err_internal")
                 await interaction.response.send_message(msg, ephemeral=True)
 
-    @app_commands.command(name="setup", description="[ADMIN] Delete old infrastructure and create a new one")
+    @app_commands.command(name="setup", description="cmd_setup_desc")
     @app_commands.default_permissions(administrator=True)
     @is_admin_or_dev()
     async def setup_infra(self, interaction: discord.Interaction):
@@ -300,41 +283,87 @@ class AdminCog(commands.Cog):
         rules_title = self.bot.i18n.get_string(locale, "admin", "reg_rules_title")
         rules_desc = self.bot.i18n.get_string(locale, "admin", "reg_rules_desc")
 
-        gh_role = discord.utils.get(guild.roles, name="grand host")
-        if not gh_role:
-            gh_role = await guild.create_role(name="grand host", color=discord.Color.purple(), hoist=True)
+        try:
+            gh_role = discord.utils.get(guild.roles, name="grand host")
+            if not gh_role:
+                gh_role = await guild.create_role(name="grand host", color=discord.Color.purple(), hoist=True)
 
-        h_role = discord.utils.get(guild.roles, name="host")
-        if not h_role:
-            h_role = await guild.create_role(name="host", color=discord.Color.blue())
+            h_role = discord.utils.get(guild.roles, name="host")
+            if not h_role:
+                h_role = await guild.create_role(name="host", color=discord.Color.blue())
 
-        ban_role_id = settings.get("ban_role_id") if settings else None
-        ban_role = guild.get_role(int(ban_role_id)) if ban_role_id else None
-        if not ban_role:
-            ban_role = discord.utils.get(guild.roles, name=role_close_ban_name)
+            ban_role_id = settings.get("ban_role_id") if settings else None
+            ban_role = guild.get_role(int(ban_role_id)) if ban_role_id else None
             if not ban_role:
-                ban_role = await guild.create_role(name=role_close_ban_name, color=discord.Color.dark_red())
+                ban_role = discord.utils.get(guild.roles, name=role_close_ban_name)
+                if not ban_role:
+                    ban_role = await guild.create_role(name=role_close_ban_name, color=discord.Color.dark_red())
+        except discord.HTTPException as e:
+            logger.error(f"Failed to create roles in {guild.id}: {e}")
+            msg = self.bot.i18n.get_context_string(interaction, "admin", "err_internal")
+            return await interaction.followup.send(msg)
 
         bot_member = guild.me
-        
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
-            ban_role: discord.PermissionOverwrite(connect=False, send_messages=False),
-            h_role: discord.PermissionOverwrite(send_messages=True),
-            gh_role: discord.PermissionOverwrite(send_messages=True),
-            bot_member: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True, manage_messages=True, manage_channels=True)
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True, 
+                send_messages=False, 
+                use_application_commands=False, 
+                connect=True, 
+                speak=True
+            ),
+            ban_role: discord.PermissionOverwrite(
+                connect=False, 
+                send_messages=False, 
+                use_application_commands=False
+            ),
+            h_role: discord.PermissionOverwrite(
+                send_messages=True, 
+                use_application_commands=True
+            ),
+            gh_role: discord.PermissionOverwrite(
+                send_messages=True, 
+                use_application_commands=True
+            ),
+            bot_member: discord.PermissionOverwrite(
+                view_channel=True, 
+                send_messages=True, 
+                embed_links=True, 
+                manage_messages=True, 
+                manage_channels=True, 
+                connect=True, 
+                move_members=True, 
+                use_application_commands=True
+            )
         }
 
-        category = await guild.create_category(cat_name, overwrites=overwrites)
-        hist_ch = await guild.create_text_channel(ch_history_name, category=category)
-        lb_ch = await guild.create_text_channel(ch_lb_name, category=category)
-        reg_ch = await guild.create_text_channel(ch_reg_name, category=category)
-        banlist_ch = await guild.create_text_channel(ch_banlist_name, category=category)
-        wait_vc = await guild.create_voice_channel(wait_vc_name, category=category)
-
-        stats_overwrites = overwrites.copy()
-        stats_overwrites[guild.default_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        stats_ch = await guild.create_text_channel(ch_stats_name, category=category, overwrites=stats_overwrites)
+        try:
+            category = await guild.create_category(cat_name, overwrites=overwrites)
+            
+            lb_ch = await guild.create_text_channel(ch_lb_name, category=category)
+            
+            stats_overwrites = overwrites.copy()
+            stats_overwrites[guild.default_role] = discord.PermissionOverwrite(
+                view_channel=True, 
+                send_messages=False, 
+                use_application_commands=True, 
+                connect=True, 
+                speak=True
+            )
+            stats_ch = await guild.create_text_channel(ch_stats_name, category=category, overwrites=stats_overwrites)
+            
+            banlist_ch = await guild.create_text_channel(ch_banlist_name, category=category)
+            
+            hist_ch = await guild.create_text_channel(ch_history_name, category=category)
+            
+            reg_ch = await guild.create_text_channel(ch_reg_name, category=category)
+            
+            wait_vc = await guild.create_voice_channel(wait_vc_name, category=category)
+            
+        except discord.HTTPException as e:
+            logger.error(f"Failed to create channels in {guild.id}: {e}")
+            msg = self.bot.i18n.get_context_string(interaction, "admin", "err_internal")
+            return await interaction.followup.send(msg)
 
         rules_embed = discord.Embed(
             title=rules_title, 
@@ -372,7 +401,7 @@ class AdminCog(commands.Cog):
         except discord.NotFound:
             pass
 
-    @app_commands.command(name="add_host", description="[GRAND HOST] Assign Host role to a player")
+    @app_commands.command(name="add_host", description="cmd_add_host_desc")
     @is_grand_host_or_admin()
     async def add_host(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -392,7 +421,7 @@ class AdminCog(commands.Cog):
             msg = self.bot.i18n.get_context_string(interaction, "admin", "err_internal")
             await interaction.followup.send(msg)
 
-    @app_commands.command(name="remove_host", description="[GRAND HOST] Remove Host role from a player")
+    @app_commands.command(name="remove_host", description="cmd_remove_host_desc")
     @is_grand_host_or_admin()
     async def remove_host(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -412,12 +441,12 @@ class AdminCog(commands.Cog):
             msg = self.bot.i18n.get_context_string(interaction, "admin", "err_internal")
             await interaction.followup.send(msg)
 
-    @app_commands.command(name="punish", description="[HOST] Punish a player (ban from matchmaking & deduct PTS)")
+    @app_commands.command(name="punish", description="cmd_punish_desc")
     @app_commands.describe(
-        member="Target player", 
-        hours="Ban duration in hours",
-        reason="Reason for punishment",
-        penalty="PTS to deduct (default: 0)"
+        member="cmd_punish_arg_member", 
+        hours="cmd_punish_arg_hours",
+        reason="cmd_punish_arg_reason",
+        penalty="cmd_punish_arg_penalty"
     )
     @is_admin_or_dev()
     async def punish_player(self, interaction: discord.Interaction, member: discord.Member, hours: int, reason: str, penalty: int = 0):
@@ -487,8 +516,8 @@ class AdminCog(commands.Cog):
         msg = self.bot.i18n.get_context_string(interaction, "admin", "punish_success", mention=member.mention, penalty=penalty, hours=hours, reason=reason)
         await interaction.followup.send(msg)
 
-    @app_commands.command(name="clear", description="[HOST] Clear messages in the current channel")
-    @app_commands.describe(amount="Number of messages to delete (1-100)")
+    @app_commands.command(name="clear", description="cmd_clear_desc")
+    @app_commands.describe(amount="cmd_clear_arg_amount")
     @is_admin_or_dev()
     async def clear_chat(self, interaction: discord.Interaction, amount: int = 10):
         if not (1 <= amount <= 100):
@@ -509,7 +538,7 @@ class AdminCog(commands.Cog):
             msg = self.bot.i18n.get_context_string(interaction, "admin", "clear_error")
             await interaction.followup.send(msg)
 
-    @app_commands.command(name="cleanup_infra", description="[ADMIN] Delete all bot channels and categories")
+    @app_commands.command(name="cleanup_infra", description="cmd_cleanup_desc")
     @app_commands.default_permissions(administrator=True)
     @is_admin_or_dev()
     async def cleanup_infra(self, interaction: discord.Interaction):
@@ -543,8 +572,8 @@ class AdminCog(commands.Cog):
         except discord.NotFound:
             pass
 
-    @app_commands.command(name="hard_reset", description="[OWNER] FULL DATABASE WIPE. Deletes stats, lobbies, history.")
-    @app_commands.describe(confirm="Type CONFIRM in uppercase to proceed")
+    @app_commands.command(name="hard_reset", description="cmd_hard_reset_desc")
+    @app_commands.describe(confirm="cmd_hard_reset_arg_confirm")
     @is_owner_or_dev()
     async def hard_reset_server(self, interaction: discord.Interaction, confirm: str):
         if confirm != "CONFIRM":
@@ -594,7 +623,7 @@ class AdminCog(commands.Cog):
             except discord.NotFound:
                 pass
 
-    @app_commands.command(name="unban", description="[HOST] Remove matchmaking ban from a player")
+    @app_commands.command(name="unban", description="cmd_unban_desc")
     @is_admin_or_dev()
     async def unban_player(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -622,6 +651,63 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(msg)
         else:
             msg = self.bot.i18n.get_context_string(interaction, "admin", "unban_not_found", mention=member.mention)
+            await interaction.followup.send(msg)
+
+    @app_commands.command(name="end_season", description="cmd_end_season_desc")
+    @app_commands.describe(confirm="cmd_end_season_arg_confirm")
+    @app_commands.default_permissions(administrator=True)
+    @is_admin_or_dev()
+    async def end_season(self, interaction: discord.Interaction, confirm: str):
+        if confirm != "CONFIRM":
+            msg = self.bot.i18n.get_context_string(interaction, "admin", "reset_warning")
+            return await interaction.response.send_message(msg, ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        guild_id = str(interaction.guild.id)
+        
+        config = await self.bot.db.get_guild_config(guild_id)
+        current_season = config.get("current_season", 1)
+        next_season = current_season + 1
+
+        try:
+            cursor = self.bot.db.users.find({"guild_id": guild_id, "season": current_season})
+            bulk_ops = []
+            
+            async for u in cursor:
+                archived_doc = u.copy()
+                archived_doc["_id"] = f"{u['_id']}_s{current_season}"
+                bulk_ops.append(InsertOne(archived_doc))
+                
+                bulk_ops.append(UpdateOne(
+                    {"_id": u["_id"], "guild_id": guild_id},
+                    {"$set": {
+                        "mmr": DEFAULT_MMR,
+                        "matches": 0, "wins": 0, "losses": 0, "streak": 0,
+                        "roles": {},
+                        "season": next_season
+                    }}
+                ))
+                
+            if bulk_ops:
+                await self.bot.db.users.bulk_write(bulk_ops)
+
+            await self.bot.db.settings.update_one(
+                {"_id": guild_id}, 
+                {"$set": {"current_season": next_season}}
+            )
+            self.bot.db.clear_guild_cache(interaction.guild.id)
+
+            if stats_cog := self.bot.get_cog("StatsCog"):
+                await stats_cog.update_leaderboard(interaction.guild)
+
+            msg = self.bot.i18n.get_context_string(interaction, "admin", "season_ended", season=current_season, next_season=next_season)
+            if msg == "admin:season_ended":
+                msg = f"Season {current_season} ended. Season {next_season} started!"
+            await interaction.followup.send(msg)
+
+        except Exception as e:
+            logger.error(f"Error ending season on guild {guild_id}: {e}", exc_info=True)
+            msg = self.bot.i18n.get_context_string(interaction, "admin", "err_internal")
             await interaction.followup.send(msg)
 
 async def setup(bot):

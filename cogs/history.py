@@ -6,6 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.embeds import WindrangerEmbed
+from core.config import DEFAULT_MMR
 
 logger = logging.getLogger('windranger.history')
 
@@ -77,7 +78,7 @@ class HistoryCog(commands.Cog):
                 self.bot.i18n, locale, match["lobby_id"], host, interaction.guild, 
                 match["radiant"], match["dire"], match["winner"], emojis
             )
-            short_id = match['lobby_id'].split('_')[1] if '_' in match['lobby_id'] else match['lobby_id']
+            short_id = match['lobby_id'].split('_')[-1] if '_' in match['lobby_id'] else match['lobby_id']
             embed.title = self.bot.i18n.get_string(locale, "history", "history_title", season=target_season, short_id=short_id)
             embeds.append(embed)
 
@@ -111,7 +112,7 @@ class HistoryCog(commands.Cog):
             msg = self.bot.i18n.get_context_string(interaction, "history", "season_stats_empty", who=who_str, season=season)
             return await interaction.followup.send(msg)
 
-        pts = p_data.get("mmr", 1000)
+        pts = p_data.get("mmr", DEFAULT_MMR)
         
         rank_query = {
             "guild_id": guild_id,

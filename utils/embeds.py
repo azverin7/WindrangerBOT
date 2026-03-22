@@ -1,13 +1,13 @@
 import discord
 from typing import Dict, List, Optional, Literal
 
-from core.config import COLOR_MAIN, COLOR_SUCCESS, COLOR_ERROR
+from core.config import COLOR_MAIN, COLOR_SUCCESS, COLOR_ERROR, DEFAULT_MMR
 from core.i18n import I18nEngine
 
 class WindrangerEmbed:
     @staticmethod
     def _get_short_id(lobby_id: str) -> str:
-        return lobby_id.split('_')[1] if '_' in lobby_id else lobby_id
+        return lobby_id.split('_')[-1] if '_' in lobby_id else lobby_id
 
     @staticmethod
     def _build_team_text(team_dict: dict, emojis: dict, empty_text: str) -> str:
@@ -147,7 +147,7 @@ class WindrangerEmbed:
 
     @staticmethod
     def player_stats(i18n: I18nEngine, locale: discord.Locale, member: discord.Member | discord.User, data: dict, rank: int, emojis: dict) -> discord.Embed:
-        mmr = data.get("mmr", 1000)
+        mmr = data.get("mmr", DEFAULT_MMR)
         matches = data.get("matches", 0)
         wins = data.get("wins", 0)
         losses = data.get("losses", 0)
@@ -207,7 +207,7 @@ class WindrangerEmbed:
 
         desc_lines = []
         for i, p in enumerate(tops):
-            mmr = p.get("mmr", 1000)
+            mmr = p.get("mmr", DEFAULT_MMR)
             wins = p.get("wins", 0)
             matches = p.get("matches", 0)
             losses = matches - wins

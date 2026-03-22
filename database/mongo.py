@@ -79,7 +79,8 @@ class Database:
         try:
             await self.users.create_indexes([
                 IndexModel([("guild_id", ASCENDING), ("season", DESCENDING), ("matches", DESCENDING), ("mmr", DESCENDING)]),
-                IndexModel([("guild_id", ASCENDING), ("season", DESCENDING), ("mmr", DESCENDING)])
+                IndexModel([("guild_id", ASCENDING), ("season", DESCENDING), ("mmr", DESCENDING)]),
+                IndexModel([("guild_id", ASCENDING), ("ban_expires", ASCENDING)])
             ])
             
             await self.match_history.create_indexes([
@@ -89,7 +90,8 @@ class Database:
             ])
             
             await self.active_lobbies.create_indexes([
-                IndexModel([("guild_id", ASCENDING), ("shuffled", ASCENDING)])
+                IndexModel([("guild_id", ASCENDING), ("shuffled", ASCENDING)]),
+                IndexModel([("message_id", ASCENDING)])
             ])
             
         except OperationFailure as e:

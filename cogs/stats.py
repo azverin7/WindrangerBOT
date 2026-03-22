@@ -36,7 +36,7 @@ class StatsCog(commands.Cog):
     async def _get_top_players(self, guild_id: str, season: int, limit: int = 10) -> list:
         cursor = self.bot.db.users.find(
             {"guild_id": guild_id, "season": season, "matches": {"$gt": 0}}
-        ).sort([("mmr", -1), ("wins", -1)]).limit(limit)
+        ).sort([("mmr", -1)]).limit(limit)
         return await cursor.to_list(length=limit)
 
     async def update_leaderboard(self, guild: discord.Guild):
@@ -69,19 +69,17 @@ class StatsCog(commands.Cog):
                 await partial_msg.edit(embed=embed)
                 return
             except discord.HTTPException as e:
-                logger.error(f"Failed to edit leaderboard message in {guild.id}: {e}")
-                msg_id = None 
+                logger.warning(f"Failed to edit leaderboard message in {guild.id}: {e}")
 
-        if not msg_id:
-            try:
-                new_msg = await channel.send(embed=embed)
-                await self.bot.db.settings.update_one(
-                    {"_id": str(guild.id)}, 
-                    {"$set": {"leaderboard_msg_id": str(new_msg.id)}}
-                )
-                self.bot.db.clear_guild_cache(guild.id)
-            except discord.HTTPException as e:
-                logger.error(f"Failed to send new leaderboard message in {guild.id}: {e}")
+        try:
+            new_msg = await channel.send(embed=embed)
+            await self.bot.db.settings.update_one(
+                {"_id": str(guild.id)}, 
+                {"$set": {"leaderboard_msg_id": str(new_msg.id)}}
+            )
+            self.bot.db.clear_guild_cache(guild.id)
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send new leaderboard message in {guild.id}: {e}")
 
     @app_commands.command(name="stats", description="Show player statistics for the current season")
     async def show_stats(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):

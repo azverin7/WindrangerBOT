@@ -90,6 +90,7 @@ class AdminCog(commands.Cog):
         cursor = self.bot.db.users.find({"ban_expires": {"$lte": now}})
         
         affected_guilds = set()
+        bulk_ops = []
         
         async for user_doc in cursor:
             guild_id = user_doc.get("guild_id")
@@ -111,10 +112,16 @@ class AdminCog(commands.Cog):
                             logger.warning(f"Worker failed to remove ban role from {user_id}: {e}")
                 affected_guilds.add(guild)
 
-            await self.bot.db.users.update_one(
+            bulk_ops.append(UpdateOne(
                 {"_id": user_id, "guild_id": guild_id},
                 {"$unset": {"ban_expires": "", "ban_reason": "", "ban_penalty": ""}}
-            )
+            ))
+
+        if bulk_ops:
+            try:
+                await self.bot.db.users.bulk_write(bulk_ops)
+            except Exception as e:
+                logger.error(f"Failed to execute bulk update in ban_expiration_worker: {e}")
 
         update_tasks = [self.update_ban_list(guild) for guild in affected_guilds]
         if update_tasks:
@@ -445,16 +452,23 @@ class AdminCog(commands.Cog):
     @app_commands.describe(
         member="cmd_punish_arg_member", 
         hours="cmd_punish_arg_hours",
+        minutes="cmd_punish_arg_minutes",
         reason="cmd_punish_arg_reason",
         penalty="cmd_punish_arg_penalty"
     )
     @is_admin_or_dev()
-    async def punish_player(self, interaction: discord.Interaction, member: discord.Member, hours: int, reason: str, penalty: int = 0):
+    async def punish_player(self, interaction: discord.Interaction, member: discord.Member, hours: int, minutes: int, reason: str, penalty: int = 0):
+        if hours < 0 or minutes < 0 or (hours == 0 and minutes == 0):
+            msg = self.bot.i18n.get_context_string(interaction, "admin", "err_invalid_duration")
+            if msg == "admin:err_invalid_duration":
+                msg = "❌ Укажите длительность бана больше нуля (часы или минуты)."
+            return await interaction.response.send_message(msg, ephemeral=True)
+
         await interaction.response.defer(ephemeral=True)
         guild_id = str(interaction.guild.id)
         locale = await self._get_locale(interaction)
         
-        expires_at = discord.utils.utcnow() + datetime.timedelta(hours=hours)
+        expires_at = discord.utils.utcnow() + datetime.timedelta(hours=hours, minutes=minutes)
         
         await self.bot.db.users.update_one(
             {"_id": str(member.id), "guild_id": guild_id},
@@ -513,7 +527,7 @@ class AdminCog(commands.Cog):
 
         await self.update_ban_list(interaction.guild)
 
-        msg = self.bot.i18n.get_context_string(interaction, "admin", "punish_success", mention=member.mention, penalty=penalty, hours=hours, reason=reason)
+        msg = self.bot.i18n.get_context_string(interaction, "admin", "punish_success", mention=member.mention, penalty=penalty, hours=hours, minutes=minutes, reason=reason)
         await interaction.followup.send(msg)
 
     @app_commands.command(name="clear", description="cmd_clear_desc")

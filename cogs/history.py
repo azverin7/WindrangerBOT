@@ -78,7 +78,7 @@ class HistoryCog(commands.Cog):
                 self.bot.i18n, locale, match["lobby_id"], host, interaction.guild, 
                 match["radiant"], match["dire"], match["winner"], emojis
             )
-            short_id = match['lobby_id'].split('_')[-1] if '_' in match['lobby_id'] else match['lobby_id']
+            short_id = WindrangerEmbed._get_short_id(match["lobby_id"])
             embed.title = self.bot.i18n.get_string(locale, "history", "history_title", season=target_season, short_id=short_id)
             embeds.append(embed)
 
@@ -114,14 +114,12 @@ class HistoryCog(commands.Cog):
 
         pts = p_data.get("mmr", DEFAULT_MMR)
         
-        rank_query = {
+        players_above = await self.bot.db.users.count_documents({
             "guild_id": guild_id,
+            "season": season,
             "mmr": {"$gt": pts},
-            "matches": {"$gt": 0},
-            "season": season
-        }
-
-        players_above = await self.bot.db.users.count_documents(rank_query)
+            "matches": {"$gt": 0}
+        })
         rank_int = players_above + 1
 
         emojis = config.get("emojis", {})

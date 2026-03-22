@@ -1,7 +1,7 @@
 import discord
 from typing import Dict, List, Optional, Literal
 
-from core.config import COLOR_MAIN, COLOR_SUCCESS, COLOR_ERROR, DEFAULT_MMR
+from core.config import COLOR_MAIN, COLOR_SUCCESS, COLOR_ERROR, DEFAULT_MMR, E_MEDALS
 from core.i18n import I18nEngine
 
 class WindrangerEmbed:
@@ -213,10 +213,7 @@ class WindrangerEmbed:
             losses = matches - wins
             wr = int((wins / matches) * 100) if matches > 0 else 0
             
-            medal = ""
-            if i == 0: medal = "🥇 "
-            elif i == 1: medal = "🥈 "
-            elif i == 2: medal = "🥉 "
+            medal = f"{E_MEDALS.get(i + 1)} " if (i + 1) in E_MEDALS else ""
             
             line = f"**{i+1}.** {medal}<@{p['_id']}> • **{mmr} MMR** • {wins}W / {losses}L ({wr}%)"
             desc_lines.append(line)

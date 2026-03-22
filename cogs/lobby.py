@@ -47,7 +47,10 @@ async def _t(bot, interaction: discord.Interaction, key: str, **kwargs) -> str:
 async def safe_gather_tasks(tasks: List[Any], chunk_size: int = 3, delay: float = 0.6) -> None:
     for i in range(0, len(tasks), chunk_size):
         chunk = tasks[i:i + chunk_size]
-        await asyncio.gather(*chunk, return_exceptions=True)
+        results = await asyncio.gather(*chunk, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                logger.error(f"Task execution failed in safe_gather_tasks: {res}", exc_info=res)
         if i + chunk_size < len(tasks):
             await asyncio.sleep(delay)
 
@@ -165,7 +168,7 @@ class AdminLobbyView(discord.ui.View):
             return await interaction.followup.send(await _t(self.bot, interaction, "vc_api_error"), ephemeral=True)
 
         res = await db.update_one(
-            {"_id": self.lobby_id, "shuffled": False},
+            {"_id": self.lobby_id, "shuffled": False, "version": lobby.get("version", 1)},
             {"$set": {
                 "shuffled": True,
                 "radiant": radiant,
@@ -700,60 +703,6 @@ class LobbyCog(commands.Cog):
         await self.bot.db.active_lobbies.update_one({"_id": lobby_id}, {"$set": {"message_id": str(msg.id)}})
         
         await interaction.followup.send(await _t(self.bot, interaction, "lobby_created", channel_id=reg_channel.id), ephemeral=True)
-
-    @app_commands.command(name="fill", description="[ADMIN] Fill the last lobby with bots")
-    @is_privileged()
-    async def fill_lobby(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        db = self.bot.db.active_lobbies
-        
-        lobby = await db.find_one({"guild_id": str(interaction.guild.id), "shuffled": False}, sort=[("_id", -1)])
-        
-        if not lobby:
-            return await interaction.followup.send(await _t(self.bot, interaction, "no_open_lobbies"), ephemeral=True)
-
-        dummy_ids = [str(100000000000000000 + i) for i in range(10)]
-        slots = lobby["slots"]
-        all_players = lobby.get("all_players", [])
-        
-        idx = 0
-        for pos in ["pos1", "pos2", "pos3", "pos4", "pos5"]:
-            while len(slots[pos]) < 2:
-                dummy_id = dummy_ids[idx]
-                slots[pos].append(dummy_id)
-                all_players.append(dummy_id)
-                idx += 1
-
-        await db.update_one(
-            {"_id": lobby["_id"]}, 
-            {"$set": {"slots": slots, "all_players": all_players, "version": lobby.get("version", 1) + 1}}
-        )
-        
-        config = await self.bot.db.get_guild_config(interaction.guild.id)
-        reg_channel = interaction.guild.get_channel(int(config["reg_channel_id"]))
-        if not reg_channel:
-            try:
-                reg_channel = await interaction.guild.fetch_channel(int(config["reg_channel_id"]))
-            except discord.NotFound:
-                pass
-                
-        try:
-            msg = await reg_channel.fetch_message(int(lobby["message_id"]))
-            host = interaction.guild.get_member(int(lobby["host_id"]))
-            emojis = await self._update_guild_emojis(interaction.guild)
-            locale = await resolve_locale(self.bot, interaction)
-            embed = WindrangerEmbed.pre_shuffle(self.bot.i18n, locale, lobby["_id"], host, interaction.guild, slots, emojis)
-            
-            view = LobbyView(self.bot, lobby["_id"], emojis, locale)
-            await msg.edit(embed=embed, view=view)
-            
-            await reg_channel.send(await _t(self.bot, interaction, "lobby_full", host_id=lobby['host_id']))
-            await interaction.followup.send(await _t(self.bot, interaction, "lobby_filled"), ephemeral=True)
-        except discord.NotFound:
-            await db.delete_one({"_id": lobby["_id"]})
-            await interaction.followup.send(await _t(self.bot, interaction, "ghost_lobby"), ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(await _t(self.bot, interaction, "update_error", e=str(e)), ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(LobbyCog(bot))

@@ -9,7 +9,7 @@ def setup_logging():
         root_logger.handlers.clear()
 
     formatter = logging.Formatter(
-        '[{asctime}] [{levelname:<8}] {name}: {message}', 
+        '[{asctime}] [{levelname:<8}] [{module}:{lineno}] {name}: {message}', 
         datefmt='%Y-%m-%d %H:%M:%S',
         style='{'
     )

@@ -6,7 +6,7 @@ from core.config import DEVELOPER_ID
 def is_privileged():
     async def predicate(interaction: discord.Interaction) -> bool:
         user = interaction.user
-        if user.id == int(DEVELOPER_ID):
+        if user.id == DEVELOPER_ID:
             return True
             
         guild = interaction.guild

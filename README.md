@@ -28,8 +28,7 @@
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/azverin7/windranger-bot.git](https://github.com/azverin7/windranger-bot.git)
-   cd windranger-bot
+   git clone https://github.com/azverin7/windranger-bot.git
 Configure Environment Variables:
 Create a .env file in the root directory:
 
@@ -107,8 +106,7 @@ Docker & Docker Compose
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/azverin7/windranger-bot.git](https://github.com/azverin7/windranger-bot.git)
-   cd windranger-bot
+   git clone https://github.com/azverin7/windranger-bot.git
 Настройте переменные окружения:
 Создайте файл .env в корневой директории:
 

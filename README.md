@@ -107,7 +107,7 @@ Docker & Docker Compose
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/yourusername/windranger-bot.git](https://github.com/yourusername/windranger-bot.git)
+   git clone [https://github.com/azverin7/windranger-bot.git](https://github.com/azverin7/windranger-bot.git)
    cd windranger-bot
 Настройте переменные окружения:
 Создайте файл .env в корневой директории:

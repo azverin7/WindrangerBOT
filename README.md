@@ -28,23 +28,29 @@
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/azverin7/windranger-bot.git
-Configure Environment Variables:
-Create a .env file in the root directory:
+   git clone https://github.com
+   ```
 
-Code fragment
+Configure Environment Variables: Create a `.env` file in the root directory:
+
+```env
 BOT_TOKEN=your_discord_bot_token_here
 MONGO_URI=mongodb://mongo:27017/windranger
 DEVELOPER_ID=your_discord_user_id
+```
+
 Deploy with Docker Compose:
 
-Bash
+```bash
 docker compose up -d --build
-Initialize Server Infrastructure:
-Once the bot is invited to your Discord server, the Server Owner or Developer must run:
+```
 
-Plaintext
+Initialize Server Infrastructure: Once the bot is invited to your Discord server, the Server Owner or Developer must run:
+
+```plaintext
 /setup
+```
+
 This will generate the necessary categories, text channels, voice waiting rooms, and roles (Grand Host, Host, Close Ban).
 
 📜 Commands Reference
